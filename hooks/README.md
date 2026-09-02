@@ -227,10 +227,11 @@ The registry (`src/discover/registry.rs`) handles command patterns across these 
 
 The registry handles `&&`, `||`, `;`, `|`, `|&`, and `&` operators:
 
-- **Pipe** (`|`): Producers and intermediate stages stay raw; only a pipeline-safe final stage is rewritten
+- **Pipe** (`|`): Producers and intermediate stages stay raw; only a pipeline-safe final stage is rewritten (`git log | grep feat` → `git log | rtk grep feat`)
+- **Pipe into a line limiter** (`| head`, `| tail`, `| cat`): when every downstream stage is one of these with flags only, the *producer* is rewritten instead, if its rule is `pipeline_producer_safe` — test runners, builds, linters (`cargo test 2>&1 | tail -30` → `rtk cargo test 2>&1 | tail -30`). Line-oriented producers (`git log | head -20`, `ls | head`) stay raw because head/tail select specific lines there
 - **Stderr pipe** (`|&`): The complete pipeline stays raw
 - **And/Or/Semicolon** (`&&`, `||`, `;`): Both sides rewritten independently
-- **Pipeline-safe rules**: Initially limited to argument-safe `grep`, `rg`, and `wc` invocations; search pattern-file forms defer
+- **Pipeline-safe final rules**: Limited to argument-safe `grep` and `rg` invocations; search pattern-file forms defer
 
 Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk cargo test`
 

@@ -144,14 +144,17 @@ rewrite_compound(cmd, excluded)                    [src/discover/registry.rs]
   |  Step 2 — Split on operators, rewrite each segment
   |  Operator (&&, ||, ;) → rewrite both sides
   |  Pipe (|) → keep producers/intermediate stages raw
-  |             rewrite only a pipeline-safe final stage
+  |             rewrite only a pipeline-safe final stage (grep/rg), or
+  |             the producer when every consumer is head/tail/cat and
+  |             the producer rule is pipeline_producer_safe
   |  Stderr pipe (|&) → keep the complete pipeline raw
   |  Shellism (&) → rewrite both sides (background)
   |
   |  Calls rewrite_segment() per segment:
   |    segment 1: "cargo fmt --all"
   |    segment 2: "cargo test 2>&1"
-  |    after pipe: "tail -20" kept raw
+  |    after pipe: "tail -20" kept raw (a pure line limiter, so the
+  |    producer "cargo test 2>&1" is rewritten as PipelineProducer)
   |
   v
 rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
@@ -210,7 +213,7 @@ LLM Agent executes rewritten command
 Key design decisions:
 - **Lexer-based tokenization**: A single-pass state machine (`lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Used for both compound splitting and redirect stripping.
 - **Segment-level rewriting**: Compound commands are split by operators, each segment rewritten independently. Bash recombines them at execution time.
-- **Pipe semantics**: Producers and intermediate stages of `|` remain raw. Only an argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; initially this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. `|&` is recognized separately and its complete pipeline stays raw.
+- **Pipe semantics**: Producers and intermediate stages of `|` remain raw by default. An argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. When every downstream stage is a pure line limiter (`head`, `tail`, `cat` with flags only, never `wc`), the producer is rewritten instead if its rule has `pipeline_producer_safe` — summary-shaped filters such as test runners, builds and linters, where `| tail -30` was only a size cap. Line-oriented rules (git, ls, find, grep, read, docker, gh, ...) are never producer-safe because head/tail select specific lines of their output. `|&` is recognized separately and its complete pipeline stays raw.
 - **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
 - **Process wrappers**: `timeout 30 cargo test`, `time cargo build`, `nice -n 10 make`, `nohup npm run build`, `stdbuf -oL pytest` and `ionice` are peeled the same way and re-prepended (`timeout 30 rtk cargo test`). A wrapper never falls through: if the inner command has no rewrite, the whole segment stays raw.
 - **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.

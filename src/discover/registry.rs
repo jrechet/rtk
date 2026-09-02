@@ -1124,7 +1124,17 @@ fn rewrite_compound(
                     analysis,
                     excluded,
                     transparent_prefixes,
-                );
+                )
+                .or_else(|| {
+                    rewrite_pipeline_producer(
+                        cmd,
+                        &tokens,
+                        seg_start,
+                        analysis,
+                        excluded,
+                        transparent_prefixes,
+                    )
+                });
 
                 if let Some(rewritten) = rewritten_pipeline {
                     any_changed = true;
@@ -1225,6 +1235,107 @@ const MAX_PREFIX_DEPTH: usize = 10;
 enum RewriteContext {
     Normal,
     PipelineFinal,
+    /// First stage of a pipeline whose every downstream stage is a pure line
+    /// limiter. Only rules with `pipeline_producer_safe` rewrite here.
+    PipelineProducer,
+}
+
+/// Consumers that only cap or pass through lines. Running them on RTK's
+/// compact output instead of the raw output keeps the intent (bound the size)
+/// while the filter keeps the signal. `wc` is deliberately absent: a line count
+/// over filtered output would silently differ from the raw count.
+const PIPELINE_LIMITER_CONSUMERS: &[&str] = &["head", "tail", "cat"];
+
+/// True when `stage` is `head`/`tail`/`cat` reading stdin with flags only.
+/// A file operand means the stage does not consume the pipe at all.
+fn stage_is_pure_line_limiter(stage: &str) -> bool {
+    let words = shell_split(stage.trim());
+    let Some(first) = words.first() else {
+        return false;
+    };
+    let base = strip_absolute_path(first);
+    if !PIPELINE_LIMITER_CONSUMERS.contains(&base.as_str()) {
+        return false;
+    }
+    let mut expects_value = false;
+    for arg in &words[1..] {
+        if expects_value {
+            expects_value = false;
+            let digits = arg.trim_start_matches(['+', '-']);
+            if !digits
+                .trim_end_matches(['k', 'K', 'm', 'M', 'b', 'B'])
+                .chars()
+                .all(|c| c.is_ascii_digit())
+                || digits.is_empty()
+            {
+                return false;
+            }
+            continue;
+        }
+        if arg == "-" {
+            continue; // explicit stdin
+        }
+        if !arg.starts_with('-') {
+            return false; // file operand: the stage does not read the pipe
+        }
+        if matches!(arg.as_str(), "-n" | "-c" | "--lines" | "--bytes") {
+            expects_value = true;
+        }
+    }
+    !expects_value
+}
+
+/// Rewrite the first stage of `cmd[seg_start..analysis.end_offset]` when every
+/// later stage is a pure line limiter. Returns the whole rewritten pipeline.
+fn rewrite_pipeline_producer(
+    cmd: &str,
+    tokens: &[ParsedToken],
+    segment_start: usize,
+    analysis: PipelineAnalysis,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    // `|&` or an empty stage already disqualified the pipeline.
+    analysis.final_stage_start?;
+
+    let mut first_pipe_offset = None;
+    let mut stage_start = segment_start;
+    for token in tokens {
+        if token.offset < segment_start {
+            continue;
+        }
+        if token.offset >= analysis.end_offset {
+            break;
+        }
+        if !matches!(token.kind, TokenKind::Pipe(_)) {
+            continue;
+        }
+        if first_pipe_offset.is_none() {
+            first_pipe_offset = Some(token.offset);
+        } else if !stage_is_pure_line_limiter(&cmd[stage_start..token.offset]) {
+            return None;
+        }
+        stage_start = token.offset + token.value.len();
+    }
+    let first_pipe_offset = first_pipe_offset?;
+    if !stage_is_pure_line_limiter(&cmd[stage_start..analysis.end_offset]) {
+        return None;
+    }
+
+    let producer = cmd[segment_start..first_pipe_offset].trim();
+    let rewritten = rewrite_segment_inner(
+        producer,
+        excluded,
+        transparent_prefixes,
+        RewriteContext::PipelineProducer,
+        0,
+    )
+    .filter(|rewritten| rewritten != producer)?;
+    Some(format!(
+        "{} {}",
+        rewritten,
+        cmd[first_pipe_offset..analysis.end_offset].trim()
+    ))
 }
 
 /// Checks whether grep or rg reads patterns from a file.
@@ -1455,7 +1566,7 @@ fn rewrite_segment_inner(
         }
         // TOML-only commands: consult the registry so the hook filters them too (#2179).
         Classification::Unsupported { .. } => {
-            if context == RewriteContext::PipelineFinal {
+            if context != RewriteContext::Normal {
                 return None;
             }
             if crate::core::toml_filter::toml_disabled() {
@@ -1482,6 +1593,9 @@ fn rewrite_segment_inner(
     if context == RewriteContext::PipelineFinal
         && (!rule.pipeline_final_safe || !pipeline_final_command_is_safe(rule.rtk_cmd, cmd_part))
     {
+        return None;
+    }
+    if context == RewriteContext::PipelineProducer && !rule.pipeline_producer_safe {
         return None;
     }
 
@@ -2003,6 +2117,157 @@ mod tests {
             .collect();
 
         assert_eq!(safe_rules, vec!["rtk grep", "rtk rg"]);
+    }
+
+    #[test]
+    fn test_pipeline_producer_rewritten_under_line_limiters() {
+        for (cmd, expected) in [
+            (
+                "cargo test 2>&1 | tail -30",
+                "rtk cargo test 2>&1 | tail -30",
+            ),
+            ("pytest -q 2>&1 | tail -20", "rtk pytest -q 2>&1 | tail -20"),
+            ("npm run build | head -50", "rtk npm run build | head -50"),
+            ("npx vitest run | tail -n 40", "rtk vitest | tail -n 40"),
+            (
+                "cargo test 2>&1 | tail -30 | head -5",
+                "rtk cargo test 2>&1 | tail -30 | head -5",
+            ),
+            ("cargo build 2>&1 | cat", "rtk cargo build 2>&1 | cat"),
+            (
+                "timeout 300 cargo test 2>&1 | tail -30",
+                "timeout 300 rtk cargo test 2>&1 | tail -30",
+            ),
+            (
+                "cargo build && cargo test 2>&1 | tail -20",
+                "rtk cargo build && rtk cargo test 2>&1 | tail -20",
+            ),
+            ("make test 2>&1 | tail -40", "rtk make test 2>&1 | tail -40"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pipeline_producer_line_oriented_rules_stay_raw() {
+        // head/tail select specific lines of these outputs; RTK's own caps
+        // (git log defaults to 10 entries) would change what the agent sees.
+        for cmd in [
+            "git log --oneline | head -20",
+            "ls -la | head",
+            "find . -name '*.rs' | head -50",
+            "grep -rn foo src | head -20",
+            "cat file.txt | tail -5",
+            "tree -L 2 | head -40",
+            "docker ps | head -5",
+            "gh pr list | head -3",
+            "pip list | head -20",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_pipeline_producer_non_limiter_consumers_stay_raw() {
+        for cmd in [
+            "cargo test 2>&1 | wc -l",
+            "cargo test | tee out.log",
+            "cargo test | tail -n +5 file.log",
+            "cargo test | head -c",
+            "cargo test | sort | uniq -c",
+            "cargo test | xargs echo",
+            "cargo test |& tail -30",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+        // A grep final stage still takes the final-stage path, producer raw.
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test 2>&1 | grep FAILED", &[]),
+            Some("cargo test 2>&1 | rtk grep FAILED".into())
+        );
+    }
+
+    #[test]
+    fn test_pipeline_producer_respects_exclusions() {
+        let excluded = vec!["cargo test".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test | tail -30", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("RTK_DISABLED=1 cargo test | tail -30", &[]),
+            None
+        );
+        // Already RTK: nothing to rewrite, the hook passes it through.
+        assert_eq!(
+            rewrite_command_no_prefixes("rtk cargo test | tail -30", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_stage_is_pure_line_limiter() {
+        for ok in [
+            "tail -30",
+            "tail -n 30",
+            "tail -n +5",
+            "head -50",
+            "head --lines=20",
+            "head -c 4k",
+            "cat",
+            "cat -",
+            "/usr/bin/tail -20",
+        ] {
+            assert!(stage_is_pure_line_limiter(ok), "{ok}");
+        }
+        for bad in [
+            "tail -n",
+            "tail file.log",
+            "head -20 out.txt",
+            "wc -l",
+            "less",
+            "tee x",
+            "",
+        ] {
+            assert!(!stage_is_pure_line_limiter(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_pipeline_producer_safe_rule_set_excludes_line_oriented() {
+        for rule in RULES.iter().filter(|rule| rule.pipeline_producer_safe) {
+            assert!(
+                !matches!(
+                    rule.rtk_cmd,
+                    "rtk git"
+                        | "rtk gh"
+                        | "rtk glab"
+                        | "rtk read"
+                        | "rtk grep"
+                        | "rtk rg"
+                        | "rtk ls"
+                        | "rtk find"
+                        | "rtk tree"
+                        | "rtk wc"
+                        | "rtk diff"
+                        | "rtk docker"
+                        | "rtk kubectl"
+                        | "rtk oc"
+                        | "rtk pip"
+                        | "rtk uv"
+                        | "rtk curl"
+                        | "rtk wget"
+                        | "rtk aws"
+                        | "rtk psql"
+                ),
+                "{} is line-oriented and must not be producer-safe",
+                rule.rtk_cmd
+            );
+        }
     }
 
     #[test]
@@ -2931,9 +3196,11 @@ mod tests {
 
     #[test]
     fn test_rewrite_pipe_unsafe_final_stage_stays_raw() {
+        // `tail` is not a rewritable final stage, but `cargo test` is a
+        // producer-safe rule, so the producer is rewritten instead.
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | tail -50", &[]),
-            None
+            Some("rtk cargo test | tail -50".into())
         );
         assert_eq!(
             rewrite_command_no_prefixes("find . | xargs grep TODO", &[]),
@@ -5845,7 +6112,7 @@ mod tests {
     fn test_rewrite_pipe_then_semicolon() {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | head; git status", &[]),
-            Some("cargo test | head; rtk git status".into())
+            Some("rtk cargo test | head; rtk git status".into())
         );
     }
 
