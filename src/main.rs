@@ -32,6 +32,7 @@ use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 /// Target agent for hook installation.
@@ -1440,6 +1441,52 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             }
             Err(e) => {
                 // Command not found — same behaviour as no-TOML path
+                core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+                eprintln!("[rtk: {}]", e);
+                Ok(127)
+            }
+        }
+    } else if !std::io::stdout().is_terminal() {
+        // No TOML match and an agent is reading (stdout is a pipe): capture,
+        // compact losslessly, and bound the size with a tee hint. A terminal
+        // keeps the streaming passthrough below.
+        let mut cmd = core::utils::resolved_command(&args[0]);
+        cmd.args(&args[1..]);
+        match core::stream::run_streaming(
+            &mut cmd,
+            core::stream::StdinMode::Inherit,
+            core::stream::FilterMode::CaptureOnly,
+        ) {
+            Ok(result) => {
+                let raw = &result.raw;
+                let limits = core::config::limits();
+                let compacted = core::passthrough::compact(raw, limits.fallback_max_chars);
+                let (text, hint) = if compacted.truncated {
+                    match core::tee::force_tee_hint(raw, &raw_command) {
+                        Some(hint) => (compacted.text, Some(hint)),
+                        // Never emit an unrecoverable truncation: keep every line.
+                        None => (core::passthrough::compact(raw, 0).text, None),
+                    }
+                } else {
+                    (compacted.text, None)
+                };
+                let mut body = text;
+                if let Some(hint) = hint {
+                    body.push_str(&hint);
+                    body.push('\n');
+                }
+                let shown = core::guard::never_worse(raw, &body);
+                print!("{}", shown);
+                timer.track(
+                    &raw_command,
+                    &format!("rtk fallback: {}", raw_command),
+                    raw,
+                    shown,
+                );
+                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                Ok(result.exit_code)
+            }
+            Err(e) => {
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
                 eprintln!("[rtk: {}]", e);
                 Ok(127)

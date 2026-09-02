@@ -131,6 +131,24 @@ pub struct LimitsConfig {
     pub status_max_untracked: usize,
     /// Max chars for parser passthrough fallback (default: 2000)
     pub passthrough_max_chars: usize,
+    /// Lines `rtk read` shows when no --max-lines/--tail-lines is given
+    /// (default: 2000, matching agent Read tools; 0 = unlimited). The
+    /// output ends with the exact command that shows the rest.
+    #[serde(default = "default_read_max_lines")]
+    pub read_max_lines: usize,
+    /// Chars kept when an unknown command falls back to raw passthrough and
+    /// stdout is not a terminal (default: 8000, ~2k tokens; 0 = unlimited).
+    /// Head and tail are kept, the middle is teed to disk with a hint.
+    #[serde(default = "default_fallback_max_chars")]
+    pub fallback_max_chars: usize,
+}
+
+fn default_read_max_lines() -> usize {
+    2000
+}
+
+fn default_fallback_max_chars() -> usize {
+    8000
 }
 
 impl Default for LimitsConfig {
@@ -141,6 +159,8 @@ impl Default for LimitsConfig {
             status_max_files: 15,
             status_max_untracked: 10,
             passthrough_max_chars: 2000,
+            read_max_lines: default_read_max_lines(),
+            fallback_max_chars: default_fallback_max_chars(),
         }
     }
 }

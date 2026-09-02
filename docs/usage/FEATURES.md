@@ -125,6 +125,10 @@ rtk read <fichier> [options]
 rtk read - [options]          # Lecture depuis stdin
 ```
 
+Sans `--max-lines` ni `--tail-lines`, la sortie est bornee a `limits.read_max_lines`
+(2000 lignes par defaut, `0` = illimite) et se termine par la commande exacte qui
+affiche la suite (`sed -n '2001,N p' FICHIER`). Les fenetres explicites ne sont jamais bornees.
+
 **Options :**
 
 | Option | Court | Defaut | Description |

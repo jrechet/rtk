@@ -66,7 +66,18 @@ pub fn run(
 
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
-    let (raw, rtk_output) = if line_numbers {
+    // No explicit window: bound very large files the way agent Read tools do,
+    // and say exactly how to get the rest. Explicit windows are never capped.
+    let cap_note = if max_lines.is_none() && tail_lines.is_none() {
+        let cap = crate::core::config::limits().read_max_lines;
+        let (window, note) = default_head_window(&filtered, &file.display().to_string(), cap);
+        filtered = window;
+        note
+    } else {
+        None
+    };
+
+    let (raw, mut rtk_output) = if line_numbers {
         (
             format_with_line_numbers(&content),
             format_with_line_numbers(&filtered),
@@ -74,6 +85,9 @@ pub fn run(
     } else {
         (content.clone(), filtered.clone())
     };
+    if let Some(note) = cap_note {
+        rtk_output.push_str(&note);
+    }
     let shown = never_worse(&raw, &rtk_output);
     print!("{}", shown);
     timer.track(
@@ -83,6 +97,31 @@ pub fn run(
         shown,
     );
     Ok(())
+}
+
+/// Keep the first `cap` lines of `content` when it is longer, and return a
+/// one-line note naming the exact command that prints the remainder. `cap == 0`
+/// disables the window. The note is returned separately so line numbering
+/// (`-n`) never numbers it.
+fn default_head_window(content: &str, source: &str, cap: usize) -> (String, Option<String>) {
+    if cap == 0 {
+        return (content.to_string(), None);
+    }
+    let total = content.lines().count();
+    if total <= cap {
+        return (content.to_string(), None);
+    }
+    let mut window: String = content.lines().take(cap).collect::<Vec<_>>().join("\n");
+    window.push('\n');
+    let note = format!(
+        "[rtk: lines 1-{} of {} shown; remaining: sed -n '{},{}p' {}]\n",
+        cap,
+        total,
+        cap + 1,
+        total,
+        source
+    );
+    (window, Some(note))
 }
 
 pub fn run_stdin(
@@ -304,5 +343,42 @@ fn main() {{
             "should warn about duplicate stdin, got stderr: {}",
             stderr
         );
+    }
+
+    #[test]
+    fn test_default_head_window_caps_and_names_remainder() {
+        let content: String = (1..=2500).map(|i| format!("line {i}\n")).collect();
+        let (window, note) = default_head_window(&content, "big.log", 2000);
+        assert_eq!(window.lines().count(), 2000);
+        assert!(window.starts_with("line 1\n"));
+        assert!(window.ends_with("line 2000\n"));
+        assert_eq!(
+            note.as_deref(),
+            Some("[rtk: lines 1-2000 of 2500 shown; remaining: sed -n '2001,2500p' big.log]\n")
+        );
+    }
+
+    #[test]
+    fn test_default_head_window_leaves_small_files_and_zero_cap_alone() {
+        let content = "a\nb\nc\n";
+        assert_eq!(
+            default_head_window(content, "f", 2000),
+            (content.to_string(), None)
+        );
+        let long: String = (1..=50).map(|i| format!("{i}\n")).collect();
+        assert_eq!(default_head_window(&long, "f", 0), (long.clone(), None));
+        // Exactly at the cap is not truncated.
+        assert_eq!(default_head_window(&long, "f", 50), (long.clone(), None));
+    }
+
+    #[test]
+    fn test_read_caps_large_file_without_explicit_window() -> Result<()> {
+        let mut file = NamedTempFile::with_suffix(".log")?;
+        for i in 1..=2100 {
+            writeln!(file, "entry {i}")?;
+        }
+        // Explicit --tail-lines is never capped: the last line survives.
+        run(file.path(), FilterLevel::None, None, Some(5), false, 0)?;
+        Ok(())
     }
 }

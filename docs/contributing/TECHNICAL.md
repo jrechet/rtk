@@ -255,7 +255,8 @@ When Clap parsing fails (unknown command):
 1. Guard: check if the command is an RTK meta-command (`gain`, `init`, etc.) -- if so, show Clap error
 2. Look up TOML DSL filters via `toml_filter::find_matching_filter()`
 3. If TOML match: capture stdout, apply filter pipeline, track savings
-4. If no match: pure passthrough with `Stdio::inherit`, track as 0% output reduction
+4. If no match and stdout is not a terminal (an agent is reading): capture, compact losslessly (`core/passthrough.rs`: ANSI stripped, blank runs collapsed, consecutive duplicate lines folded as `line (×N)`), then cap at `limits.fallback_max_chars` keeping head and tail, with the middle teed to disk and a `[full output: …]` hint. If tee is unavailable the uncapped compact text is shown instead — never an unrecoverable truncation
+5. If no match and stdout is a terminal: pure passthrough with `Stdio::inherit`, track as 0% output reduction
 
 ```
 Command received
@@ -264,7 +265,8 @@ Command received
      -> No:  run_fallback()
               -> TOML filter match?
                  -> Yes: Capture stdout, apply filter, track savings
-                 -> No:  Passthrough (inherit stdio, track 0% reduction)
+                 -> No:  stdout is a pipe? Capture + compact + cap (core/passthrough)
+                         stdout is a TTY? Passthrough (inherit stdio, track 0% reduction)
 ```
 
 > **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine, filter pipeline stages, and trust-gated project filters.
