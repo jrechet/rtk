@@ -1024,6 +1024,60 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Switch branches → "ok <branch>" (same messages as checkout)
+    Switch {
+        /// Git switch arguments (-c, --detach, branch)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Restore paths → "ok N paths restored"
+    Restore {
+        /// Git restore arguments (--staged, --source, pathspecs)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Merge → one-line result, conflicts without hints on failure
+    Merge {
+        /// Git merge arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Rebase → one-line result, conflicts without hints on failure (-i passes through)
+    Rebase {
+        /// Git rebase arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Cherry-pick → "ok <hash> <diffstat>"
+    CherryPick {
+        /// Git cherry-pick arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Revert → "ok <hash> <diffstat>"
+    Revert {
+        /// Git revert arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Reset → "ok HEAD <hash>" or a capped list of unstaged paths
+    Reset {
+        /// Git reset arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Tag list capped at 50; create/delete → "ok"
+    Tag {
+        /// Git tag arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Tracked files capped at 50, the rest teed
+    LsFiles {
+        /// Git ls-files arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Blame grouped by commit run (hash/author/date once per range)
     Blame {
         /// Git blame arguments (supports -L, -w, -M, -C, revisions, -- path)
@@ -1913,6 +1967,65 @@ fn run_cli() -> Result<i32> {
                 )?,
                 GitCommands::Blame { args } => git::run(
                     git::GitCommand::Blame,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Switch { args } => git::run(
+                    git::GitCommand::Switch,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Restore { args } => git::run(
+                    git::GitCommand::Restore,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Merge { args } => git::run(
+                    git::GitCommand::Merge,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Rebase { args } => git::run(
+                    git::GitCommand::Rebase,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::CherryPick { args } => git::run(
+                    git::GitCommand::CherryPick,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Revert { args } => git::run(
+                    git::GitCommand::Revert,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Reset { args } => git::run(
+                    git::GitCommand::Reset,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Tag { args } => {
+                    git::run(git::GitCommand::Tag, &args, None, cli.verbose, &global_args)?
+                }
+                GitCommands::LsFiles { args } => git::run(
+                    git::GitCommand::LsFiles,
                     &args,
                     None,
                     cli.verbose,

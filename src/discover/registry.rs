@@ -2818,6 +2818,45 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_git_write_subcommands() {
+        for (cmd, expected) in [
+            ("git switch main", "rtk git switch main"),
+            ("git switch -c feature", "rtk git switch -c feature"),
+            ("git restore .", "rtk git restore ."),
+            (
+                "git restore --staged src/a.rs",
+                "rtk git restore --staged src/a.rs",
+            ),
+            (
+                "git merge --no-edit feature",
+                "rtk git merge --no-edit feature",
+            ),
+            ("git rebase main", "rtk git rebase main"),
+            ("git rebase -i HEAD~3", "rtk git rebase -i HEAD~3"),
+            ("git cherry-pick abc1234", "rtk git cherry-pick abc1234"),
+            ("git revert HEAD", "rtk git revert HEAD"),
+            ("git reset --hard HEAD~1", "rtk git reset --hard HEAD~1"),
+            ("git tag", "rtk git tag"),
+            ("git tag -a v1.0 -m rel", "rtk git tag -a v1.0 -m rel"),
+            ("git ls-files src", "rtk git ls-files src"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "git remote -v",
+            "git rev-parse HEAD",
+            "git reflog",
+            "git tagging",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
     fn test_rewrite_dotnet_test() {
         assert_eq!(
             rewrite_command_no_prefixes("dotnet test --no-build", &[]),

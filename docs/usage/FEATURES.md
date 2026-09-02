@@ -538,6 +538,25 @@ que le filtre ne reproduit pas passent en clair : expressions booleennes
 
 ---
 
+### `rtk git switch/restore/merge/rebase/cherry-pick/revert/reset/tag/ls-files` -- Operations d'ecriture
+
+| Commande | Succes | Echec |
+|----------|--------|-------|
+| `switch` | `ok main`, `ok feature (new)` | message git |
+| `restore` | `ok N paths restored` | message git |
+| `merge` | `ok merge 3 files +10 -2`, `ok (fast-forward) ...`, `ok (up-to-date)` | `FAILED: git merge — N conflicts` + lignes `CONFLICT`, sans les `hint:` |
+| `rebase` | `ok rebased feature`, `ok (up-to-date)` | idem, prefixe `Rebasing (n/m)` retire |
+| `cherry-pick` / `revert` | `ok <hash> 1 file +1 -1` | idem |
+| `reset` | `ok HEAD <hash> <msg>` ou `ok N unstaged changes` + liste plafonnee a 20 | message git |
+| `tag` | liste plafonnee a 50 ; creation/suppression → `ok` ou la ligne git | message git |
+| `ls-files` | 50 premiers chemins puis `+N more files` avec hint tee | message git |
+
+Les formes interactives (`-i`, `--interactive`, `-p`, `--patch`, `-e`, `--edit`) passent
+en clair avec le terminal. `git remote`, `git rev-parse`, `git reflog` restent en
+passthrough : leur sortie est deja minimale.
+
+---
+
 ### Passthrough git
 
 Toute sous-commande git non listee ci-dessus est executee directement :
