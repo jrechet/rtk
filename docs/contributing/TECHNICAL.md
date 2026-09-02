@@ -186,7 +186,9 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
 classify_command(cmd)                              [src/discover/registry.rs]
   |  1. Check IGNORED_EXACT (cd, echo, fi, done, ...)
   |  2. Check IGNORED_PREFIXES (rtk, mkdir, mv, ...)
-  |  3. Strip env prefix with ENV_PREFIX regex (for pattern matching only)
+  |  3. Strip env prefix with ENV_PREFIX regex (for pattern matching only),
+  |     then process wrappers (PROCESS_WRAPPER: timeout N, time, nice, nohup,
+  |     stdbuf, ionice), then any env prefix the wrapper guarded
   |  4. Normalize absolute paths: /usr/bin/grep → grep
   |  5. Strip git global opts: git -C /tmp status → git status
   |  6. Guard: cat/head/tail with redirect (>, >>) → Unsupported (write, not read)
@@ -210,6 +212,7 @@ Key design decisions:
 - **Segment-level rewriting**: Compound commands are split by operators, each segment rewritten independently. Bash recombines them at execution time.
 - **Pipe semantics**: Producers and intermediate stages of `|` remain raw. Only an argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; initially this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. `|&` is recognized separately and its complete pipeline stays raw.
 - **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
+- **Process wrappers**: `timeout 30 cargo test`, `time cargo build`, `nice -n 10 make`, `nohup npm run build`, `stdbuf -oL pytest` and `ionice` are peeled the same way and re-prepended (`timeout 30 rtk cargo test`). A wrapper never falls through: if the inner command has no rewrite, the whole segment stays raw.
 - **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.
 
 ### 3.3 CLI Parsing and Routing

@@ -60,6 +60,26 @@ static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .map(|r| Regex::new(r.pattern).expect("invalid regex"))
         .collect()
 });
+/// Process wrappers that run a command unchanged but sit in front of it:
+/// `timeout 30 cargo test`, `time cargo build`, `nice -n 10 make`,
+/// `nohup npm run build`, `stdbuf -oL pytest`, `ionice -c 3 rsync`.
+/// They are peeled like env prefixes so the inner command is classified and
+/// rewritten, then re-prepended: `timeout 30 rtk cargo test`.
+/// `timeout` must carry a duration and `stdbuf` a mode flag, so an unusual
+/// spelling simply fails to match and the command stays raw.
+static PROCESS_WRAPPER: LazyLock<Regex> = LazyLock::new(|| {
+    let timeout = r"timeout(?:\s+(?:--preserve-status|--foreground|-v|--verbose|--signal=\S+|--kill-after=\S+|-[sk]\s*\S+))*\s+\d+(?:\.\d+)?[smhd]?";
+    let time = r"time(?:\s+-p)?";
+    let nice = r"nice(?:\s+-n\s*-?\d+|\s+-\d+|\s+--adjustment=-?\d+)?";
+    let ionice = r"ionice(?:\s+-[cn]\s*\d+)*";
+    let nohup = r"nohup";
+    let stdbuf = r"stdbuf(?:\s+-[oei]\s*\S+|\s+--(?:output|error|input)=\S+)+";
+    Regex::new(&format!(
+        r"^(?:(?:{timeout}|{time}|{nice}|{ionice}|{nohup}|{stdbuf})\s+)+"
+    ))
+    .unwrap()
+});
+
 static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     let double_quoted = r#""(?:[^"\\]|\\.)*""#;
     let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
@@ -122,8 +142,12 @@ pub fn classify_command(cmd: &str) -> Classification {
         }
     }
 
-    // Strip env prefixes (sudo, env VAR=val, VAR=val)
+    // Strip env prefixes (sudo, env VAR=val, VAR=val), then process wrappers
+    // (timeout, time, nice, nohup, stdbuf), then any env prefix the wrapper
+    // itself was guarding: `timeout 30 RUST_LOG=debug cargo test`.
     let stripped = ENV_PREFIX.replace(trimmed, "");
+    let (_, after_wrapper) = strip_process_wrappers(&stripped);
+    let stripped = ENV_PREFIX.replace(after_wrapper, "");
     let cmd_clean = stripped.trim();
     if cmd_clean.is_empty() {
         return Classification::Ignored;
@@ -490,6 +514,16 @@ pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
     let prefix_part = &trimmed[..prefix_len];
     let rest = trimmed[prefix_len..].trim();
     (prefix_part, rest)
+}
+
+/// Split leading process wrappers (`timeout 30 `, `time `, `nice -n 5 `, ...)
+/// from the command they run. Returns `("", cmd)` when there is none.
+pub fn strip_process_wrappers(cmd: &str) -> (&str, &str) {
+    let trimmed = cmd.trim();
+    match PROCESS_WRAPPER.find(trimmed) {
+        Some(m) => (&trimmed[..m.end()], trimmed[m.end()..].trim()),
+        None => ("", trimmed),
+    }
 }
 
 fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
@@ -1321,6 +1355,23 @@ fn rewrite_segment_inner(
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
+    // Process wrappers never fall through: `rtk timeout` is not a command, so an
+    // inner command that does not rewrite leaves the whole segment raw.
+    let (wrapper_prefix, rest_after_wrapper) = strip_process_wrappers(trimmed);
+    if !wrapper_prefix.is_empty() {
+        if rest_after_wrapper.is_empty() {
+            return None;
+        }
+        let rewritten = rewrite_segment_inner(
+            rest_after_wrapper,
+            excluded,
+            transparent_prefixes,
+            context,
+            depth + 1,
+        )?;
+        return Some(format!("{}{}", wrapper_prefix, rewritten));
+    }
+
     for (prefix, routable) in builtin_transparent_prefixes() {
         if let Some(rest) = strip_word_prefix(trimmed, prefix) {
             if rest.is_empty() {
@@ -2131,6 +2182,114 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_process_wrapper_stripped() {
+        for cmd in [
+            "timeout 30 cargo test",
+            "timeout -k 5 2m cargo test",
+            "timeout --preserve-status -s KILL 300 cargo test",
+            "time cargo test",
+            "time -p cargo test",
+            "nice -n 10 cargo test",
+            "nice cargo test",
+            "nohup cargo test",
+            "stdbuf -oL -eL cargo test",
+            "ionice -c 3 nice -n 19 cargo test",
+            "timeout 30 RUST_LOG=debug cargo test",
+            "RUST_BACKTRACE=1 timeout 30 cargo test",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(cmd),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk cargo",
+                        ..
+                    }
+                ),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_process_wrapper_requires_arguments() {
+        // Without a duration `timeout` is not a wrapper we understand: the
+        // command stays unsupported rather than being mis-routed.
+        assert!(matches!(
+            classify_command("timeout cargo test"),
+            Classification::Unsupported { .. }
+        ));
+        // A bare wrapper with nothing to run is not a wrapper we peel either.
+        assert!(matches!(
+            classify_command("timeout 30"),
+            Classification::Unsupported { .. }
+        ));
+        assert!(matches!(
+            classify_command("timeouts 30 cargo test"),
+            Classification::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_process_wrapper_reprepended() {
+        for (cmd, expected) in [
+            ("timeout 30 cargo test", "timeout 30 rtk cargo test"),
+            (
+                "timeout -k 5 2m git status",
+                "timeout -k 5 2m rtk git status",
+            ),
+            ("time cargo build", "time rtk cargo build"),
+            (
+                "nice -n 10 cargo build --release",
+                "nice -n 10 rtk cargo build --release",
+            ),
+            ("nohup npm run build", "nohup rtk npm run build"),
+            ("stdbuf -oL pytest -q", "stdbuf -oL rtk pytest -q"),
+            (
+                "timeout 60 cargo test 2>&1",
+                "timeout 60 rtk cargo test 2>&1",
+            ),
+            (
+                "cargo fmt && timeout 300 cargo test",
+                "rtk cargo fmt && timeout 300 rtk cargo test",
+            ),
+            (
+                "timeout 30 RUST_LOG=debug cargo test",
+                "timeout 30 RUST_LOG=debug rtk cargo test",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_process_wrapper_never_falls_through() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 30 rm -rf build", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 30 my-script.sh", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("timeout 30", &[]), None);
+        // RTK_DISABLED behind a wrapper still disables the rewrite.
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 30 RTK_DISABLED=1 cargo test", &[]),
+            None
+        );
+        // exclude_commands still applies to the inner command.
+        let excluded = vec!["cargo test".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 30 cargo test", &excluded),
+            None
+        );
+    }
+
+    #[test]
     fn test_classify_sudo_stripped() {
         assert_eq!(
             classify_command("sudo docker ps"),
@@ -2375,6 +2534,55 @@ mod tests {
             ),
             "git -C should be classified as supported, got: {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cargo_nextest_and_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo nextest run --workspace", &[]),
+            Some("rtk cargo nextest run --workspace".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo run --release -- --port 8080", &[]),
+            Some("rtk cargo run --release -- --port 8080".into())
+        );
+        // Unrelated cargo subcommands stay raw.
+        assert_eq!(rewrite_command_no_prefixes("cargo runner", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cargo doc --open", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_dotnet_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("dotnet test --no-build", &[]),
+            Some("rtk dotnet test --no-build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_lifecycle_and_install_subcommands() {
+        for (cmd, expected) in [
+            ("npm test", "rtk npm test"),
+            ("npm t", "rtk npm t"),
+            ("npm install", "rtk npm install"),
+            ("npm i express", "rtk npm i express"),
+            ("npm ci", "rtk npm ci"),
+            ("npm ls --depth=0", "rtk npm ls --depth=0"),
+            ("npm outdated", "rtk npm outdated"),
+            ("npm audit", "rtk npm audit"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        // Long-running dev servers must keep streaming raw.
+        assert_eq!(rewrite_command_no_prefixes("npm start", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("npm run dev", &[]),
+            Some("rtk npm run dev".into())
         );
     }
 

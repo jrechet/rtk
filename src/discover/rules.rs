@@ -69,7 +69,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
+        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install|nextest|run)(\s|$)",
         rtk_cmd: "rtk cargo",
         rewrite_prefixes: &["cargo"],
         category: "Cargo",
@@ -87,7 +87,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
+        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x|test|t|install|i|ci|ls|list|outdated|update|audit)(\s|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
@@ -703,7 +703,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^dotnet\s+build\b",
+        pattern: r"^dotnet\s+(build|test)\b",
         rtk_cmd: "rtk dotnet",
         rewrite_prefixes: &["dotnet"],
         category: "Build",

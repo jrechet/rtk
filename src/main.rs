@@ -1241,6 +1241,12 @@ enum CargoCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run with compile progress stripped (program output streams unchanged)
+    Run {
+        /// Additional cargo run arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported cargo subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2300,6 +2306,9 @@ fn run_cli() -> Result<i32> {
             }
             CargoCommands::Nextest { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Nextest, &args, cli.verbose)?
+            }
+            CargoCommands::Run { args } => {
+                cargo_cmd::run(cargo_cmd::CargoCommand::Run, &args, cli.verbose)?
             }
             CargoCommands::Other(args) => cargo_cmd::run_passthrough(&args, cli.verbose)?,
         },

@@ -620,6 +620,18 @@ Filtre la sortie de `cargo nextest` pour n'afficher que les echecs.
 
 ---
 
+### `rtk cargo run` -- Execution Rust
+
+```bash
+rtk cargo run [args...] [-- program-args...]
+```
+
+Supprime les lignes de progression de compilation (`Compiling`, `Finished`, `Running`)
+et les remplace par une ligne `[rtk: N crates compiled]`. La sortie du programme et les
+diagnostics du compilateur (warnings, erreurs) sont transmis tels quels, en streaming.
+
+---
+
 ### `rtk jest` / `rtk vitest` -- Tests Jest/Vitest
 
 ```bash
