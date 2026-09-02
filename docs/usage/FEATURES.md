@@ -1008,6 +1008,13 @@ abc123def456   nginx:1.25     "/dock..."  ...      db   postgres:16 Up 2d (healt
 789012345678   postgres:16    "docker..."           redis redis:7 Up 1d
 ```
 
+
+**Operations avec progression** : `rtk docker pull`, `rtk docker compose up -d|down|pull|stop|start|restart`.
+Les redessins de terminal et lignes de progression par couche sont replies :
+`latest: Pulling from library/nginx` / `5 layers pulled, 2 cached` / `Status: Downloaded newer image...`.
+Pour compose, seul l'etat final de chaque ressource est affiche (`Container demo-web-1  Started`).
+`docker compose up` sans `-d` reste en streaming brut, il attache les logs des services.
+
 ---
 
 ### `rtk kubectl` -- Kubernetes

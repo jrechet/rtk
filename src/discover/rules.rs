@@ -544,7 +544,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
+        pattern: r"^docker\s+(ps|images|logs|run|exec|build|pull|compose\s+(ps|logs|build|down|pull|stop|start|restart|up\b.*\s(?:-d|--detach)\b))",
         rtk_cmd: "rtk docker",
         rewrite_prefixes: &["docker"],
         category: "Infra",

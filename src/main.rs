@@ -1140,6 +1140,12 @@ enum DockerCommands {
     Images,
     /// Show container logs (deduplicated)
     Logs { container: String },
+    /// Pull an image: layer progress folded into counts
+    Pull {
+        /// docker pull arguments (image[:tag], --platform, ...)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Docker Compose commands with compact output
     Compose {
         #[command(subcommand)]
@@ -1169,6 +1175,42 @@ enum ComposeCommands {
     Build {
         /// Optional service name
         service: Option<String>,
+    },
+    /// Start services: final state per resource (streams raw without -d)
+    Up {
+        /// compose up arguments (-d, --build, services)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Stop and remove services: final state per resource
+    Down {
+        /// compose down arguments (-v, --remove-orphans, services)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Pull service images: layer progress folded into counts
+    Pull {
+        /// compose pull arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Stop services: final state per resource
+    Stop {
+        /// compose stop arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Start services: final state per resource
+    Start {
+        /// compose start arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Restart services: final state per resource
+    Restart {
+        /// compose restart arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Passthrough: runs any unsupported compose subcommand directly
     #[command(external_subcommand)]
@@ -2187,10 +2229,29 @@ fn run_cli() -> Result<i32> {
                 ComposeCommands::Build { service } => {
                     container::run_compose_build(service.as_deref(), cli.verbose)?
                 }
+                ComposeCommands::Up { args } => {
+                    container::run_compose_op("up", &args, cli.verbose)?
+                }
+                ComposeCommands::Down { args } => {
+                    container::run_compose_op("down", &args, cli.verbose)?
+                }
+                ComposeCommands::Pull { args } => {
+                    container::run_compose_op("pull", &args, cli.verbose)?
+                }
+                ComposeCommands::Stop { args } => {
+                    container::run_compose_op("stop", &args, cli.verbose)?
+                }
+                ComposeCommands::Start { args } => {
+                    container::run_compose_op("start", &args, cli.verbose)?
+                }
+                ComposeCommands::Restart { args } => {
+                    container::run_compose_op("restart", &args, cli.verbose)?
+                }
                 ComposeCommands::Other(args) => {
                     container::run_compose_passthrough(&args, cli.verbose)?
                 }
             },
+            DockerCommands::Pull { args } => container::run_docker_pull(&args, cli.verbose)?,
             DockerCommands::Other(args) => container::run_docker_passthrough(&args, cli.verbose)?,
         },
 

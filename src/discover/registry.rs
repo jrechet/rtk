@@ -2857,6 +2857,40 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_docker_pull_and_compose_ops() {
+        for (cmd, expected) in [
+            ("docker pull nginx:1.25", "rtk docker pull nginx:1.25"),
+            ("docker compose up -d", "rtk docker compose up -d"),
+            (
+                "docker compose up -d --build web",
+                "rtk docker compose up -d --build web",
+            ),
+            (
+                "docker compose up --detach",
+                "rtk docker compose up --detach",
+            ),
+            ("docker compose down -v", "rtk docker compose down -v"),
+            ("docker compose pull", "rtk docker compose pull"),
+            (
+                "docker compose restart web",
+                "rtk docker compose restart web",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        // Attached `up` streams service logs: never captured.
+        assert_eq!(rewrite_command_no_prefixes("docker compose up", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose up --build web", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_dotnet_test() {
         assert_eq!(
             rewrite_command_no_prefixes("dotnet test --no-build", &[]),
@@ -4056,18 +4090,20 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_docker_compose_up_skipped() {
+    fn test_rewrite_docker_compose_up_attached_skipped() {
+        // Without -d, `up` attaches to the service logs: it must keep streaming.
+        assert_eq!(rewrite_command_no_prefixes("docker compose up", &[]), None);
         assert_eq!(
             rewrite_command_no_prefixes("docker compose up -d", &[]),
-            None
+            Some("rtk docker compose up -d".into())
         );
     }
 
     #[test]
-    fn test_rewrite_docker_compose_down_skipped() {
+    fn test_rewrite_docker_compose_down() {
         assert_eq!(
             rewrite_command_no_prefixes("docker compose down", &[]),
-            None
+            Some("rtk docker compose down".into())
         );
     }
 
