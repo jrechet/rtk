@@ -13,7 +13,8 @@ TOML works well for commands with **predictable, line-by-line text output** wher
 - Install/update logs (brew, composer, poetry) — strip `Using ...` / `Already installed` lines
 - System monitoring (df, ps, systemctl) — keep essential rows, drop headers/decorations
 - Simple linters (shellcheck, yamllint, hadolint) — strip context, keep findings
-- Infra tools (terraform plan, helm, rsync) — strip progress, keep summary
+- Infra tools (terraform plan/init/validate/fmt/apply, helm, rsync) — strip progress, keep summary
+- System logs (journalctl, never in follow mode) — drop date/host prefixes, keep the tail
 
 For the full contribution checklist (including `discover/rules.rs` registration), see [src/cmds/README.md — Adding a New Command Filter](../cmds/README.md#adding-a-new-command-filter).
 

@@ -1102,7 +1102,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^terraform\s+plan",
+        pattern: r"^terraform\s+(plan|init|validate|fmt|(?:apply|destroy)\b.*-auto-approve)",
         rtk_cmd: "rtk terraform",
         pipeline_producer_safe: true,
         rewrite_prefixes: &["terraform"],
@@ -1134,6 +1134,15 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["uv"],
         category: "Python",
         savings_pct: 65.0,
+        ..RtkRule::DEFAULT
+    },
+    // Same regex as src/filters/journalctl.toml: follow mode is never matched.
+    RtkRule {
+        pattern: r"^journalctl(?:\s+(?:-[a-eg-zA-Z0-9]+|--(?:[a-eg-z][\w-]*)(?:=\S+)?|[^-\s]\S*))*\s*$",
+        rtk_cmd: "rtk journalctl",
+        rewrite_prefixes: &["journalctl"],
+        category: "Infra",
+        savings_pct: 40.0,
         ..RtkRule::DEFAULT
     },
     RtkRule {

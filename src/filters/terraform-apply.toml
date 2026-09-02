@@ -1,0 +1,62 @@
+# Only the non-interactive form is matched: without -auto-approve, apply and
+# destroy stop at an "Enter a value:" prompt that a captured stdout would hide.
+[filters.terraform-apply]
+description = "Compact Terraform apply/destroy output (non-interactive)"
+match_command = "^terraform\\s+(apply|destroy)\\b.*-auto-approve"
+strip_ansi = true
+strip_lines_matching = [
+  "^Refreshing state",
+  "^\\S.*: Refreshing state\\.\\.\\.",
+  "^\\S.*: (Creating|Modifying|Destroying|Reading)\\.\\.\\.",
+  "^\\S.*: Still (creating|modifying|destroying|reading)\\.\\.\\.",
+  "^\\s*#.*unchanged",
+  "^\\s*$",
+  "^Acquiring state lock",
+  "^Releasing state lock",
+  "^Terraform used the selected providers",
+  "^Terraform will perform the following actions",
+  "^Terraform will perform the actions described above",
+  "^Only 'yes' will be accepted",
+  "^Enter a value",
+  "^Do you want to perform these actions",
+  "^Terraform has compared your real infrastructure",
+  "^Unless you have made equivalent changes",
+]
+max_lines = 80
+on_empty = "terraform apply: no changes"
+
+[[tests.terraform-apply]]
+name = "keeps the plan diff, completion lines and outputs"
+input = """
+Acquiring state lock. This may take a few moments...
+aws_instance.web: Refreshing state... [id=i-0123]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # aws_instance.web will be created
+  + resource "aws_instance" "web" {
+      + ami = "ami-123"
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+aws_instance.web: Creating...
+aws_instance.web: Still creating... [10s elapsed]
+aws_instance.web: Creation complete after 12s [id=i-0456]
+Releasing state lock. This may take a few moments...
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+instance_id = "i-0456"
+"""
+expected = "plan. Resource actions are indicated with the following symbols:\n  + create\n  # aws_instance.web will be created\n  + resource \"aws_instance\" \"web\" {\n      + ami = \"ami-123\"\n    }\nPlan: 1 to add, 0 to change, 0 to destroy.\naws_instance.web: Creation complete after 12s [id=i-0456]\nApply complete! Resources: 1 added, 0 changed, 0 destroyed.\nOutputs:\ninstance_id = \"i-0456\""
+
+[[tests.terraform-apply]]
+name = "no changes"
+input = "aws_instance.web: Refreshing state... [id=i-0123]\n\nNo changes. Your infrastructure matches the configuration.\n\nApply complete! Resources: 0 added, 0 changed, 0 destroyed.\n"
+expected = "No changes. Your infrastructure matches the configuration.\nApply complete! Resources: 0 added, 0 changed, 0 destroyed."

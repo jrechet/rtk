@@ -2891,6 +2891,65 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_terraform_lifecycle() {
+        for (cmd, expected) in [
+            ("terraform init", "rtk terraform init"),
+            ("terraform init -upgrade", "rtk terraform init -upgrade"),
+            ("terraform validate", "rtk terraform validate"),
+            ("terraform fmt -recursive", "rtk terraform fmt -recursive"),
+            (
+                "terraform apply -auto-approve",
+                "rtk terraform apply -auto-approve",
+            ),
+            (
+                "terraform destroy -auto-approve -var env=dev",
+                "rtk terraform destroy -auto-approve -var env=dev",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        // Interactive apply/destroy wait on a prompt: never captured.
+        assert_eq!(rewrite_command_no_prefixes("terraform apply", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("terraform destroy", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_journalctl_never_follows() {
+        for (cmd, expected) in [
+            ("journalctl -u nginx -n 50", "rtk journalctl -u nginx -n 50"),
+            ("journalctl -xe", "rtk journalctl -xe"),
+            (
+                "journalctl --unit=nginx --since today",
+                "rtk journalctl --unit=nginx --since today",
+            ),
+            (
+                "journalctl -b -p err --no-pager",
+                "rtk journalctl -b -p err --no-pager",
+            ),
+            ("journalctl", "rtk journalctl"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "journalctl -f",
+            "journalctl -u nginx -f",
+            "journalctl -xef",
+            "journalctl --follow -u nginx",
+            "journalctl -u nginx --follow",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
     fn test_rewrite_dotnet_test() {
         assert_eq!(
             rewrite_command_no_prefixes("dotnet test --no-build", &[]),
