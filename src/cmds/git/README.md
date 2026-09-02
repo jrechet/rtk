@@ -8,6 +8,8 @@
 - Default `git status` uses `--porcelain -b` so the compact output never exceeds raw `git status` (an untracked directory collapses to a single line, matching git's default); branch/short-only flags reuse the compact path, other explicit args still pass through unchanged
 - Global git options (`-C`, `--git-dir`, `--work-tree`, `--no-pager`) are prepended before the subcommand
 - Exit code propagation is critical for CI/CD pipelines
+- `git blame` injects `--date=short` and groups consecutive lines by commit (`compact_blame`): one `hash author date Lstart-end` header per run, code lines kept with their number, capped at `limits.read_max_lines` with a `git blame -L` resume hint. Machine formats (`--porcelain`, `-p`, `--incremental`) and header toggles (`-s`, `-n`, `-t`, `--date=`) pass through; any unparsed line falls back to raw
+- `git grep` is not in `git.rs`: `main.rs` routes it to `system/search.rs` as `Engine::GitGrep` (binary `git`, subcommand `grep`, git global options as prefix args). It forces `-n -H -I -z` and rewrites `path\0line\0content` to the shared `path\0line:content` shape; boolean expressions, context flags, `-p`/`-W`, layout flags and revision operands pass through
 - **glab_cmd.rs** declares `-R`/`--repo` and `-g`/`--group` at the clap level; they are **appended** to the glab args (not prepended) so subcommand dispatch stays intact
 - `has_output_flag()` short-circuits to passthrough when the user explicitly requests `-F` / `--output` / `--json` (avoids double JSON injection)
 - `should_passthrough_view()` redirects `mr/issue view` to passthrough when `--web` or `--comments` is set

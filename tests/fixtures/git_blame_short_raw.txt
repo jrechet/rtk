@@ -1,0 +1,286 @@
+77a09514 (aesoft         2026-03-28   1) //! Shared command execution skeleton for filter modules.
+77a09514 (aesoft         2026-03-28   2) 
+77a09514 (aesoft         2026-03-28   3) use anyhow::{Context, Result};
+77a09514 (aesoft         2026-03-28   4) use std::process::Command;
+77a09514 (aesoft         2026-03-28   5) 
+b3936b8e (aesoft         2026-04-09   6) use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
+77a09514 (aesoft         2026-03-28   7) use crate::core::tracking;
+77a09514 (aesoft         2026-03-28   8) 
+861a46de (Adrien Eppling 2026-06-23   9) /// Compose `filtered` with an optional recovery `hint`, cap the total at `raw`
+861a46de (Adrien Eppling 2026-06-23  10) /// (never emit more tokens than the command), print it, and return what was
+861a46de (Adrien Eppling 2026-06-23  11) /// emitted so the caller tracks exactly that.
+861a46de (Adrien Eppling 2026-06-23  12) pub fn emit_guarded(filtered: &str, hint: Option<&str>, raw: &str) -> String {
+861a46de (Adrien Eppling 2026-06-23  13)     let body = match hint {
+861a46de (Adrien Eppling 2026-06-23  14)         Some(h) => format!("{}\n{}", filtered, h),
+861a46de (Adrien Eppling 2026-06-23  15)         None => filtered.to_string(),
+861a46de (Adrien Eppling 2026-06-23  16)     };
+861a46de (Adrien Eppling 2026-06-23  17)     let shown = crate::core::guard::never_worse(raw, &body).to_string();
+861a46de (Adrien Eppling 2026-06-23  18)     println!("{}", shown);
+861a46de (Adrien Eppling 2026-06-23  19)     shown
+861a46de (Adrien Eppling 2026-06-23  20) }
+861a46de (Adrien Eppling 2026-06-23  21) 
+861a46de (Adrien Eppling 2026-06-23  22) pub fn print_with_hint(
+861a46de (Adrien Eppling 2026-06-23  23)     filtered: &str,
+861a46de (Adrien Eppling 2026-06-23  24)     tee_raw: &str,
+861a46de (Adrien Eppling 2026-06-23  25)     guard_raw: &str,
+861a46de (Adrien Eppling 2026-06-23  26)     tee_label: &str,
+861a46de (Adrien Eppling 2026-06-23  27)     exit_code: i32,
+861a46de (Adrien Eppling 2026-06-23  28) ) -> String {
+861a46de (Adrien Eppling 2026-06-23  29)     let hint = crate::core::tee::tee_and_hint(tee_raw, tee_label, exit_code);
+861a46de (Adrien Eppling 2026-06-23  30)     emit_guarded(filtered, hint.as_deref(), guard_raw)
+77a09514 (aesoft         2026-03-28  31) }
+77a09514 (aesoft         2026-03-28  32) 
+77a09514 (aesoft         2026-03-28  33) #[derive(Default)]
+77a09514 (aesoft         2026-03-28  34) pub struct RunOptions<'a> {
+77a09514 (aesoft         2026-03-28  35)     pub tee_label: Option<&'a str>,
+77a09514 (aesoft         2026-03-28  36)     pub filter_stdout_only: bool,
+e48485ad (aesoft         2026-03-29  37)     pub skip_filter_on_failure: bool,
+e48485ad (aesoft         2026-03-29  38)     pub no_trailing_newline: bool,
+62fc0e0d (Adrien Eppling 2026-05-12  39)     /// Forward rtk's own stdin to the child process. Needed for commands that
+62fc0e0d (Adrien Eppling 2026-05-12  40)     /// can read from a pipe (e.g. `cat file | rtk wc`); without it the child
+62fc0e0d (Adrien Eppling 2026-05-12  41)     /// gets an empty stdin and reports zero.
+62fc0e0d (Adrien Eppling 2026-05-12  42)     pub inherit_stdin: bool,
+77a09514 (aesoft         2026-03-28  43) }
+77a09514 (aesoft         2026-03-28  44) 
+77a09514 (aesoft         2026-03-28  45) impl<'a> RunOptions<'a> {
+77a09514 (aesoft         2026-03-28  46)     pub fn with_tee(label: &'a str) -> Self {
+77a09514 (aesoft         2026-03-28  47)         Self {
+77a09514 (aesoft         2026-03-28  48)             tee_label: Some(label),
+77a09514 (aesoft         2026-03-28  49)             ..Default::default()
+77a09514 (aesoft         2026-03-28  50)         }
+77a09514 (aesoft         2026-03-28  51)     }
+77a09514 (aesoft         2026-03-28  52) 
+77a09514 (aesoft         2026-03-28  53)     pub fn stdout_only() -> Self {
+77a09514 (aesoft         2026-03-28  54)         Self {
+77a09514 (aesoft         2026-03-28  55)             filter_stdout_only: true,
+77a09514 (aesoft         2026-03-28  56)             ..Default::default()
+77a09514 (aesoft         2026-03-28  57)         }
+77a09514 (aesoft         2026-03-28  58)     }
+77a09514 (aesoft         2026-03-28  59) 
+77a09514 (aesoft         2026-03-28  60)     pub fn tee(mut self, label: &'a str) -> Self {
+77a09514 (aesoft         2026-03-28  61)         self.tee_label = Some(label);
+77a09514 (aesoft         2026-03-28  62)         self
+77a09514 (aesoft         2026-03-28  63)     }
+e48485ad (aesoft         2026-03-29  64) 
+e48485ad (aesoft         2026-03-29  65)     pub fn early_exit_on_failure(mut self) -> Self {
+e48485ad (aesoft         2026-03-29  66)         self.skip_filter_on_failure = true;
+e48485ad (aesoft         2026-03-29  67)         self
+e48485ad (aesoft         2026-03-29  68)     }
+e48485ad (aesoft         2026-03-29  69) 
+e48485ad (aesoft         2026-03-29  70)     pub fn no_trailing_newline(mut self) -> Self {
+e48485ad (aesoft         2026-03-29  71)         self.no_trailing_newline = true;
+e48485ad (aesoft         2026-03-29  72)         self
+e48485ad (aesoft         2026-03-29  73)     }
+62fc0e0d (Adrien Eppling 2026-05-12  74) 
+62fc0e0d (Adrien Eppling 2026-05-12  75)     pub fn inherit_stdin(mut self) -> Self {
+62fc0e0d (Adrien Eppling 2026-05-12  76)         self.inherit_stdin = true;
+62fc0e0d (Adrien Eppling 2026-05-12  77)         self
+62fc0e0d (Adrien Eppling 2026-05-12  78)     }
+77a09514 (aesoft         2026-03-28  79) }
+77a09514 (aesoft         2026-03-28  80) 
+f69ad6ed (xiaozh         2026-06-01  81) pub type CaptureFilter<'a> = Box<dyn Fn(&str) -> String + 'a>;
+f69ad6ed (xiaozh         2026-06-01  82) pub type ExitAwareCaptureFilter<'a> = Box<dyn Fn(&str, i32) -> String + 'a>;
+f69ad6ed (xiaozh         2026-06-01  83) 
+b3936b8e (aesoft         2026-04-09  84) pub enum RunMode<'a> {
+f69ad6ed (xiaozh         2026-06-01  85)     Filtered(CaptureFilter<'a>),
+f69ad6ed (xiaozh         2026-06-01  86)     FilteredWithExit(ExitAwareCaptureFilter<'a>),
+b3936b8e (aesoft         2026-04-09  87)     Streamed(Box<dyn StreamFilter + 'a>),
+b3936b8e (aesoft         2026-04-09  88)     Passthrough,
+b3936b8e (aesoft         2026-04-09  89) }
+b3936b8e (aesoft         2026-04-09  90) 
+f69ad6ed (xiaozh         2026-06-01  91) fn run_captured_filter<F>(
+f69ad6ed (xiaozh         2026-06-01  92)     mut cmd: Command,
+f69ad6ed (xiaozh         2026-06-01  93)     tool_name: &str,
+f69ad6ed (xiaozh         2026-06-01  94)     cmd_label: &str,
+f69ad6ed (xiaozh         2026-06-01  95)     filter_fn: F,
+f69ad6ed (xiaozh         2026-06-01  96)     opts: RunOptions<'_>,
+f69ad6ed (xiaozh         2026-06-01  97)     timer: tracking::TimedExecution,
+f69ad6ed (xiaozh         2026-06-01  98) ) -> Result<i32>
+f69ad6ed (xiaozh         2026-06-01  99) where
+f69ad6ed (xiaozh         2026-06-01 100)     F: Fn(&str, i32) -> String,
+f69ad6ed (xiaozh         2026-06-01 101) {
+f69ad6ed (xiaozh         2026-06-01 102)     let stdin_mode = if opts.inherit_stdin {
+f69ad6ed (xiaozh         2026-06-01 103)         StdinMode::Inherit
+f69ad6ed (xiaozh         2026-06-01 104)     } else {
+f69ad6ed (xiaozh         2026-06-01 105)         StdinMode::Null
+f69ad6ed (xiaozh         2026-06-01 106)     };
+f69ad6ed (xiaozh         2026-06-01 107)     let result = stream::run_streaming(&mut cmd, stdin_mode, FilterMode::CaptureOnly)
+f69ad6ed (xiaozh         2026-06-01 108)         .with_context(|| format!("Failed to run {}", tool_name))?;
+f69ad6ed (xiaozh         2026-06-01 109) 
+f69ad6ed (xiaozh         2026-06-01 110)     let exit_code = result.exit_code;
+f69ad6ed (xiaozh         2026-06-01 111)     let raw = &result.raw;
+f69ad6ed (xiaozh         2026-06-01 112)     let raw_stdout = &result.raw_stdout;
+f69ad6ed (xiaozh         2026-06-01 113) 
+f69ad6ed (xiaozh         2026-06-01 114)     if opts.skip_filter_on_failure && exit_code != 0 {
+f69ad6ed (xiaozh         2026-06-01 115)         if !result.raw_stdout.trim().is_empty() {
+f69ad6ed (xiaozh         2026-06-01 116)             print!("{}", result.raw_stdout);
+f69ad6ed (xiaozh         2026-06-01 117)         }
+f69ad6ed (xiaozh         2026-06-01 118)         if !result.raw_stderr.trim().is_empty() {
+f69ad6ed (xiaozh         2026-06-01 119)             eprint!("{}", result.raw_stderr);
+f69ad6ed (xiaozh         2026-06-01 120)         }
+f69ad6ed (xiaozh         2026-06-01 121)         timer.track(cmd_label, &format!("rtk {}", cmd_label), raw, raw);
+f69ad6ed (xiaozh         2026-06-01 122)         return Ok(exit_code);
+f69ad6ed (xiaozh         2026-06-01 123)     }
+f69ad6ed (xiaozh         2026-06-01 124) 
+f69ad6ed (xiaozh         2026-06-01 125)     let text_to_filter = if opts.filter_stdout_only {
+f69ad6ed (xiaozh         2026-06-01 126)         raw_stdout
+f69ad6ed (xiaozh         2026-06-01 127)     } else {
+f69ad6ed (xiaozh         2026-06-01 128)         raw
+f69ad6ed (xiaozh         2026-06-01 129)     };
+f69ad6ed (xiaozh         2026-06-01 130)     let filtered = filter_fn(text_to_filter, exit_code);
+f69ad6ed (xiaozh         2026-06-01 131) 
+f69ad6ed (xiaozh         2026-06-01 132)     let raw_for_tracking = if opts.filter_stdout_only {
+f69ad6ed (xiaozh         2026-06-01 133)         raw_stdout
+f69ad6ed (xiaozh         2026-06-01 134)     } else {
+f69ad6ed (xiaozh         2026-06-01 135)         raw
+f69ad6ed (xiaozh         2026-06-01 136)     };
+861a46de (Adrien Eppling 2026-06-23 137) 
+861a46de (Adrien Eppling 2026-06-23 138)     let shown = if let Some(label) = opts.tee_label {
+861a46de (Adrien Eppling 2026-06-23 139)         print_with_hint(&filtered, raw, raw_for_tracking, label, exit_code)
+861a46de (Adrien Eppling 2026-06-23 140)     } else {
+861a46de (Adrien Eppling 2026-06-23 141)         let guarded = crate::core::guard::never_worse(raw_for_tracking, &filtered).to_string();
+861a46de (Adrien Eppling 2026-06-23 142)         if opts.no_trailing_newline {
+861a46de (Adrien Eppling 2026-06-23 143)             print!("{}", guarded);
+861a46de (Adrien Eppling 2026-06-23 144)         } else {
+861a46de (Adrien Eppling 2026-06-23 145)             println!("{}", guarded);
+861a46de (Adrien Eppling 2026-06-23 146)         }
+861a46de (Adrien Eppling 2026-06-23 147)         guarded
+861a46de (Adrien Eppling 2026-06-23 148)     };
+861a46de (Adrien Eppling 2026-06-23 149) 
+f69ad6ed (xiaozh         2026-06-01 150)     timer.track(
+f69ad6ed (xiaozh         2026-06-01 151)         cmd_label,
+f69ad6ed (xiaozh         2026-06-01 152)         &format!("rtk {}", cmd_label),
+f69ad6ed (xiaozh         2026-06-01 153)         raw_for_tracking,
+861a46de (Adrien Eppling 2026-06-23 154)         &shown,
+f69ad6ed (xiaozh         2026-06-01 155)     );
+f69ad6ed (xiaozh         2026-06-01 156)     Ok(exit_code)
+f69ad6ed (xiaozh         2026-06-01 157) }
+f69ad6ed (xiaozh         2026-06-01 158) 
+b3936b8e (aesoft         2026-04-09 159) pub fn run(
+77a09514 (aesoft         2026-03-28 160)     mut cmd: Command,
+77a09514 (aesoft         2026-03-28 161)     tool_name: &str,
+77a09514 (aesoft         2026-03-28 162)     args_display: &str,
+b3936b8e (aesoft         2026-04-09 163)     mode: RunMode<'_>,
+b3936b8e (aesoft         2026-04-09 164)     opts: RunOptions<'_>,
+b3936b8e (aesoft         2026-04-09 165) ) -> Result<i32> {
+b3936b8e (aesoft         2026-04-09 166)     let timer = tracking::TimedExecution::start();
+b3936b8e (aesoft         2026-04-09 167)     let cmd_label = format!("{} {}", tool_name, args_display);
+b3936b8e (aesoft         2026-04-09 168) 
+b3936b8e (aesoft         2026-04-09 169)     match mode {
+f69ad6ed (xiaozh         2026-06-01 170)         RunMode::Filtered(filter_fn) => run_captured_filter(
+f69ad6ed (xiaozh         2026-06-01 171)             cmd,
+f69ad6ed (xiaozh         2026-06-01 172)             tool_name,
+f69ad6ed (xiaozh         2026-06-01 173)             &cmd_label,
+f69ad6ed (xiaozh         2026-06-01 174)             move |text, _| filter_fn(text),
+f69ad6ed (xiaozh         2026-06-01 175)             opts,
+f69ad6ed (xiaozh         2026-06-01 176)             timer,
+f69ad6ed (xiaozh         2026-06-01 177)         ),
+f69ad6ed (xiaozh         2026-06-01 178)         RunMode::FilteredWithExit(filter_fn) => run_captured_filter(
+f69ad6ed (xiaozh         2026-06-01 179)             cmd,
+f69ad6ed (xiaozh         2026-06-01 180)             tool_name,
+f69ad6ed (xiaozh         2026-06-01 181)             &cmd_label,
+f69ad6ed (xiaozh         2026-06-01 182)             move |text, exit_code| filter_fn(text, exit_code),
+f69ad6ed (xiaozh         2026-06-01 183)             opts,
+f69ad6ed (xiaozh         2026-06-01 184)             timer,
+f69ad6ed (xiaozh         2026-06-01 185)         ),
+b3936b8e (aesoft         2026-04-09 186)         RunMode::Streamed(filter) => {
+b3936b8e (aesoft         2026-04-09 187)             let result =
+b3936b8e (aesoft         2026-04-09 188)                 stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::Streaming(filter))
+b3936b8e (aesoft         2026-04-09 189)                     .with_context(|| format!("Failed to run {}", tool_name))?;
+b3936b8e (aesoft         2026-04-09 190) 
+b3936b8e (aesoft         2026-04-09 191)             if let Some(label) = opts.tee_label {
+b3936b8e (aesoft         2026-04-09 192)                 if let Some(hint) =
+b3936b8e (aesoft         2026-04-09 193)                     crate::core::tee::tee_and_hint(&result.raw, label, result.exit_code)
+b3936b8e (aesoft         2026-04-09 194)                 {
+b3936b8e (aesoft         2026-04-09 195)                     println!("{}", hint);
+b3936b8e (aesoft         2026-04-09 196)                 }
+b3936b8e (aesoft         2026-04-09 197)             }
+b3936b8e (aesoft         2026-04-09 198) 
+b3936b8e (aesoft         2026-04-09 199)             timer.track(
+b3936b8e (aesoft         2026-04-09 200)                 &cmd_label,
+b3936b8e (aesoft         2026-04-09 201)                 &format!("rtk {}", cmd_label),
+b3936b8e (aesoft         2026-04-09 202)                 &result.raw,
+b3936b8e (aesoft         2026-04-09 203)                 &result.filtered,
+b3936b8e (aesoft         2026-04-09 204)             );
+b3936b8e (aesoft         2026-04-09 205)             Ok(result.exit_code)
+b3936b8e (aesoft         2026-04-09 206)         }
+b3936b8e (aesoft         2026-04-09 207)         RunMode::Passthrough => {
+b3936b8e (aesoft         2026-04-09 208)             let result =
+b3936b8e (aesoft         2026-04-09 209)                 stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
+b3936b8e (aesoft         2026-04-09 210)                     .with_context(|| format!("Failed to run {}", tool_name))?;
+b3936b8e (aesoft         2026-04-09 211) 
+b3936b8e (aesoft         2026-04-09 212)             timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+b3936b8e (aesoft         2026-04-09 213)             Ok(result.exit_code)
+b3936b8e (aesoft         2026-04-09 214)         }
+b3936b8e (aesoft         2026-04-09 215)     }
+b3936b8e (aesoft         2026-04-09 216) }
+b3936b8e (aesoft         2026-04-09 217) 
+b3936b8e (aesoft         2026-04-09 218) pub fn run_filtered<F>(
+b3936b8e (aesoft         2026-04-09 219)     cmd: Command,
+b3936b8e (aesoft         2026-04-09 220)     tool_name: &str,
+b3936b8e (aesoft         2026-04-09 221)     args_display: &str,
+77a09514 (aesoft         2026-03-28 222)     filter_fn: F,
+77a09514 (aesoft         2026-03-28 223)     opts: RunOptions<'_>,
+32ff4663 (aesoft         2026-03-28 224) ) -> Result<i32>
+77a09514 (aesoft         2026-03-28 225) where
+77a09514 (aesoft         2026-03-28 226)     F: Fn(&str) -> String,
+77a09514 (aesoft         2026-03-28 227) {
+b3936b8e (aesoft         2026-04-09 228)     run(
+b3936b8e (aesoft         2026-04-09 229)         cmd,
+b3936b8e (aesoft         2026-04-09 230)         tool_name,
+b3936b8e (aesoft         2026-04-09 231)         args_display,
+b3936b8e (aesoft         2026-04-09 232)         RunMode::Filtered(Box::new(filter_fn)),
+b3936b8e (aesoft         2026-04-09 233)         opts,
+b3936b8e (aesoft         2026-04-09 234)     )
+77a09514 (aesoft         2026-03-28 235) }
+e48485ad (aesoft         2026-03-29 236) 
+f69ad6ed (xiaozh         2026-06-01 237) pub fn run_filtered_with_exit<F>(
+f69ad6ed (xiaozh         2026-06-01 238)     cmd: Command,
+f69ad6ed (xiaozh         2026-06-01 239)     tool_name: &str,
+f69ad6ed (xiaozh         2026-06-01 240)     args_display: &str,
+f69ad6ed (xiaozh         2026-06-01 241)     filter_fn: F,
+f69ad6ed (xiaozh         2026-06-01 242)     opts: RunOptions<'_>,
+f69ad6ed (xiaozh         2026-06-01 243) ) -> Result<i32>
+f69ad6ed (xiaozh         2026-06-01 244) where
+f69ad6ed (xiaozh         2026-06-01 245)     F: Fn(&str, i32) -> String,
+f69ad6ed (xiaozh         2026-06-01 246) {
+f69ad6ed (xiaozh         2026-06-01 247)     run(
+f69ad6ed (xiaozh         2026-06-01 248)         cmd,
+f69ad6ed (xiaozh         2026-06-01 249)         tool_name,
+f69ad6ed (xiaozh         2026-06-01 250)         args_display,
+f69ad6ed (xiaozh         2026-06-01 251)         RunMode::FilteredWithExit(Box::new(filter_fn)),
+f69ad6ed (xiaozh         2026-06-01 252)         opts,
+f69ad6ed (xiaozh         2026-06-01 253)     )
+f69ad6ed (xiaozh         2026-06-01 254) }
+f69ad6ed (xiaozh         2026-06-01 255) 
+e48485ad (aesoft         2026-03-29 256) pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> Result<i32> {
+2ad15793 (Trevin Chow    2026-04-25 257)     if verbose > 0 {
+2ad15793 (Trevin Chow    2026-04-25 258)         eprintln!("{} passthrough: {:?}", tool, args);
+2ad15793 (Trevin Chow    2026-04-25 259)     }
+b3936b8e (aesoft         2026-04-09 260)     let mut cmd = crate::core::utils::resolved_command(tool);
+b3936b8e (aesoft         2026-04-09 261)     cmd.args(args);
+e48485ad (aesoft         2026-03-29 262)     let args_str = tracking::args_display(args);
+b3936b8e (aesoft         2026-04-09 263)     run(
+b3936b8e (aesoft         2026-04-09 264)         cmd,
+2ad15793 (Trevin Chow    2026-04-25 265)         tool,
+2ad15793 (Trevin Chow    2026-04-25 266)         &args_str,
+b3936b8e (aesoft         2026-04-09 267)         RunMode::Passthrough,
+b3936b8e (aesoft         2026-04-09 268)         RunOptions::default(),
+b3936b8e (aesoft         2026-04-09 269)     )
+b3936b8e (aesoft         2026-04-09 270) }
+b3936b8e (aesoft         2026-04-09 271) 
+b3936b8e (aesoft         2026-04-09 272) pub fn run_streamed(
+b3936b8e (aesoft         2026-04-09 273)     cmd: Command,
+b3936b8e (aesoft         2026-04-09 274)     tool_name: &str,
+b3936b8e (aesoft         2026-04-09 275)     args_display: &str,
+b3936b8e (aesoft         2026-04-09 276)     filter: Box<dyn StreamFilter + '_>,
+b3936b8e (aesoft         2026-04-09 277)     opts: RunOptions<'_>,
+b3936b8e (aesoft         2026-04-09 278) ) -> Result<i32> {
+b3936b8e (aesoft         2026-04-09 279)     run(
+b3936b8e (aesoft         2026-04-09 280)         cmd,
+b3936b8e (aesoft         2026-04-09 281)         tool_name,
+b3936b8e (aesoft         2026-04-09 282)         args_display,
+b3936b8e (aesoft         2026-04-09 283)         RunMode::Streamed(filter),
+b3936b8e (aesoft         2026-04-09 284)         opts,
+b3936b8e (aesoft         2026-04-09 285)     )
+e48485ad (aesoft         2026-03-29 286) }

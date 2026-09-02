@@ -1003,6 +1003,18 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Blame grouped by commit run (hash/author/date once per range)
+    Blame {
+        /// Git blame arguments (supports -L, -w, -M, -C, revisions, -- path)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Grep the tracked files with grouped, capped matches (same filter as rtk grep)
+    Grep {
+        /// Git grep arguments (pattern, pathspecs, -n, -i, -w, --cached, ...)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1878,6 +1890,22 @@ fn run_cli() -> Result<i32> {
                     cli.verbose,
                     &global_args,
                 )?,
+                GitCommands::Blame { args } => git::run(
+                    git::GitCommand::Blame,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Grep { args } => search::run(
+                    search::Engine::GitGrep,
+                    &global_args,
+                    80,
+                    200,
+                    false,
+                    &args,
+                    cli.verbose,
+                )?,
                 GitCommands::Other(args) => git::run_passthrough(&args, &global_args, cli.verbose)?,
             }
         }
@@ -2078,15 +2106,22 @@ fn run_cli() -> Result<i32> {
             extra_args,
         } => search::run(
             search::Engine::Grep,
+            &[],
             max_len,
             max,
             context_only,
             &extra_args,
             cli.verbose,
         )?,
-        Commands::Rg { extra_args } => {
-            search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
-        }
+        Commands::Rg { extra_args } => search::run(
+            search::Engine::Rg,
+            &[],
+            80,
+            200,
+            false,
+            &extra_args,
+            cli.verbose,
+        )?,
 
         Commands::Init {
             global,

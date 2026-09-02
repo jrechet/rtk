@@ -13,8 +13,10 @@ use crate::core::utils::{
     exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
 };
 use anyhow::{Context, Result};
+use regex::Regex;
 use std::ffi::OsString;
 use std::process::Command;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -31,6 +33,7 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    Blame,
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -106,6 +109,7 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::Blame => run_blame(args, verbose, global_args),
     }
 }
 
@@ -2629,6 +2633,233 @@ fn filter_worktree_list(output: &str) -> String {
     result.join("\n")
 }
 
+// --- git blame ---
+
+/// Flags whose output shape rtk does not compact: machine formats, header
+/// field toggles and alternate date formats. They pass through verbatim.
+const BLAME_PASSTHROUGH_FLAGS: &[&str] = &[
+    "--porcelain",
+    "--line-porcelain",
+    "--incremental",
+    "-p",
+    "-s",
+    "-n",
+    "--show-number",
+    "-c",
+    "--show-stats",
+    "-t",
+    "--score-debug",
+];
+
+/// Flags that consume the next argument, so it is not the blamed path.
+const BLAME_VALUE_FLAGS: &[&str] = &[
+    "-L",
+    "-S",
+    "--contents",
+    "--since",
+    "--ignore-rev",
+    "--ignore-revs-file",
+    "--date",
+    "--abbrev",
+];
+
+/// One `git blame --date=short` line: `hash [file] (author YYYY-MM-DD  N) code`.
+static BLAME_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(\^?[0-9a-f]{4,40})(?: (\S+))? \((.+?) (\d{4}-\d{2}-\d{2}) +(\d+)\) ?(.*)$")
+        .unwrap()
+});
+
+/// Consecutive lines attributed to the same commit.
+struct BlameRun {
+    hash: String,
+    author: String,
+    date: String,
+    lines: Vec<(usize, String)>,
+}
+
+fn run_blame(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let args = &args_utils::restore_double_dash(args);
+
+    if verbose > 0 {
+        eprintln!("git blame {}", args.join(" "));
+    }
+
+    let raw_shape = args.iter().any(|a| {
+        BLAME_PASSTHROUGH_FLAGS.contains(&a.as_str()) || a.starts_with("--date=")
+    });
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("blame");
+    if !raw_shape {
+        // Short dates are what the compact form prints; the long form (with
+        // time and zone) is only ever noise for an agent.
+        cmd.arg("--date=short");
+    }
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run git blame")?;
+    let label = format!("git blame {}", args.join(" "));
+
+    if !result.stderr.trim().is_empty() {
+        eprint!("{}", result.stderr);
+    }
+    if !result.success() {
+        print!("{}", result.stdout);
+        timer.track(&label, &format!("rtk {}", label), &result.stdout, &result.stdout);
+        return Ok(result.exit_code);
+    }
+
+    let raw = &result.stdout;
+    let compacted = if raw_shape {
+        None
+    } else {
+        let cap = crate::core::config::limits().read_max_lines;
+        compact_blame(raw, &blame_target(args), cap)
+    };
+    let shown = match compacted.as_deref() {
+        Some(compact) => never_worse(raw, compact),
+        None => raw.as_str(),
+    };
+    print!("{}", shown);
+    timer.track(&label, &format!("rtk {}", label), raw, shown);
+    Ok(0)
+}
+
+/// The blamed path: the last positional that is not the value of a flag.
+fn blame_target(args: &[String]) -> String {
+    let mut skip_next = false;
+    let mut target = None;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if BLAME_VALUE_FLAGS.contains(&arg.as_str()) {
+            skip_next = true;
+            continue;
+        }
+        if arg == "--" || arg.starts_with('-') {
+            continue;
+        }
+        target = Some(arg.clone());
+    }
+    target.unwrap_or_else(|| "<file>".to_string())
+}
+
+/// Group blame lines by consecutive commit: one `hash author date Lstart-end`
+/// header per run, then the code lines with their line number. Metadata that
+/// git repeats on every line is printed once per run; the code stays intact.
+/// Bounded at `cap` code lines (0 = unlimited) with the exact `git blame -L`
+/// command for the rest. Returns `None` when a line does not parse, so the
+/// caller shows the raw output instead.
+pub(crate) fn compact_blame(raw: &str, source: &str, cap: usize) -> Option<String> {
+    let clean = strip_ansi(raw);
+    let mut runs: Vec<BlameRun> = Vec::new();
+    for line in clean.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let caps = BLAME_LINE_RE.captures(line)?;
+        let hash = caps[1].to_string();
+        let author = caps[3].trim().to_string();
+        let date = caps[4].to_string();
+        let lineno: usize = caps[5].parse().ok()?;
+        let code = caps
+            .get(6)
+            .map(|m| m.as_str().trim_end())
+            .unwrap_or("")
+            .to_string();
+        match runs.last_mut() {
+            Some(run) if run.hash == hash => run.lines.push((lineno, code)),
+            _ => runs.push(BlameRun {
+                hash,
+                author,
+                date,
+                lines: vec![(lineno, code)],
+            }),
+        }
+    }
+    if runs.is_empty() {
+        return None;
+    }
+
+    let total: usize = runs.iter().map(|r| r.lines.len()).sum();
+    let commits = runs
+        .iter()
+        .map(|r| r.hash.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let authors = runs
+        .iter()
+        .map(|r| r.author.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let first_line = runs[0].lines[0].0;
+    let last_line = runs
+        .iter()
+        .flat_map(|r| r.lines.iter().map(|(n, _)| *n))
+        .max()
+        .unwrap_or(first_line);
+    let width = last_line.to_string().len();
+
+    let mut out = format!(
+        "{} lines · {} {} · {} {}\n",
+        total,
+        commits,
+        pluralize(commits, "commit", "commits"),
+        authors,
+        pluralize(authors, "author", "authors"),
+    );
+    let mut shown = 0usize;
+    let mut last_shown = first_line;
+    let mut truncated = false;
+    'runs: for run in &runs {
+        if cap > 0 && shown >= cap {
+            truncated = true;
+            break;
+        }
+        let start = run.lines[0].0;
+        let end = run.lines[run.lines.len() - 1].0;
+        let range = if start == end {
+            format!("L{}", start)
+        } else {
+            format!("L{}-{}", start, end)
+        };
+        out.push_str(&format!(
+            "{} {} {} {}\n",
+            run.hash, run.author, run.date, range
+        ));
+        for (n, code) in &run.lines {
+            if cap > 0 && shown >= cap {
+                truncated = true;
+                break 'runs;
+            }
+            if code.is_empty() {
+                out.push_str(&format!("{:>width$}│\n", n, width = width));
+            } else {
+                out.push_str(&format!("{:>width$}│ {}\n", n, code, width = width));
+            }
+            shown += 1;
+            last_shown = *n;
+        }
+    }
+    if truncated {
+        out.push_str(&format!(
+            "[rtk: lines {}-{} of {} shown; remaining: git blame -L {},{} {}]\n",
+            first_line,
+            last_shown,
+            total,
+            last_shown + 1,
+            last_line,
+            source
+        ));
+    }
+    Some(out)
+}
+
 /// Runs an unsupported git subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
@@ -4716,5 +4947,112 @@ To https://github.com/foo/bar.git
             input_tokens,
             output_tokens
         );
+    }
+
+    // --- git blame ---
+
+    const BLAME_FIXTURE: &str = include_str!("../../../tests/fixtures/git_blame_short_raw.txt");
+
+    #[test]
+    fn test_compact_blame_groups_runs_and_keeps_every_code_line() {
+        let out = compact_blame(BLAME_FIXTURE, "src/core/runner.rs", 0).expect("parses");
+        let raw_lines = BLAME_FIXTURE.lines().count();
+        let code_lines = out.lines().filter(|l| l.contains('│')).count();
+        assert_eq!(code_lines, raw_lines, "every blamed line is shown");
+        assert!(out.starts_with(&format!("{} lines · ", raw_lines)), "{out}");
+
+        let header_re = Regex::new(r"^\^?[0-9a-f]{4,40} .+ \d{4}-\d{2}-\d{2} L\d+(-\d+)?$").unwrap();
+        let headers: Vec<&str> = out
+            .lines()
+            .skip(1)
+            .filter(|l| !l.contains('│'))
+            .collect();
+        assert!(!headers.is_empty());
+        for h in &headers {
+            assert!(header_re.is_match(h), "bad run header: {h}");
+        }
+        // Consecutive headers never share a hash: runs are maximal.
+        for pair in headers.windows(2) {
+            let a = pair[0].split(' ').next().unwrap();
+            let b = pair[1].split(' ').next().unwrap();
+            assert_ne!(a, b, "adjacent runs must differ: {}", pair[0]);
+        }
+        // The first code line of the fixture survives verbatim (with its number).
+        let first_code = BLAME_FIXTURE.lines().next().unwrap().split(") ").nth(1).unwrap();
+        assert!(out.contains(&format!("1│ {}", first_code)), "{out}");
+    }
+
+    #[test]
+    fn test_compact_blame_savings_on_real_fixture() {
+        let out = compact_blame(BLAME_FIXTURE, "src/core/runner.rs", 0).expect("parses");
+        let savings = 100.0 - (out.len() as f64 / BLAME_FIXTURE.len() as f64 * 100.0);
+        // The code itself is ~39% of the raw bytes in this fixture, so the
+        // ceiling for a form that keeps every code line is ~61%. Repeated
+        // hash/author/date metadata is what goes away.
+        assert!(savings >= 40.0, "expected >=40% savings, got {:.1}%", savings);
+    }
+
+    #[test]
+    fn test_compact_blame_caps_with_resume_command() {
+        let raw = "\
+abc12345 (Jane Doe 2026-01-02  1) fn a() {}
+abc12345 (Jane Doe 2026-01-02  2) fn b() {}
+def67890 (John Roe 2026-02-03  3) fn c() {}
+def67890 (John Roe 2026-02-03  4) fn d() {}
+def67890 (John Roe 2026-02-03  5) fn e() {}
+";
+        let out = compact_blame(raw, "src/x.rs", 3).unwrap();
+        assert_eq!(
+            out,
+            "5 lines · 2 commits · 2 authors\n\
+abc12345 Jane Doe 2026-01-02 L1-2\n\
+1│ fn a() {}\n\
+2│ fn b() {}\n\
+def67890 John Roe 2026-02-03 L3-5\n\
+3│ fn c() {}\n\
+[rtk: lines 1-3 of 5 shown; remaining: git blame -L 4,5 src/x.rs]\n"
+        );
+        // Unlimited and exactly-at-cap are not truncated.
+        assert!(!compact_blame(raw, "src/x.rs", 0).unwrap().contains("[rtk:"));
+        assert!(!compact_blame(raw, "src/x.rs", 5).unwrap().contains("[rtk:"));
+    }
+
+    #[test]
+    fn test_compact_blame_single_line_run_and_padding() {
+        let raw = "\
+^1a2b3c4 (Al      2026-01-02 10) x
+^1a2b3c4 (Al      2026-01-02 11) 
+9f8e7d6c src/y.rs (Bea Long Name 2026-03-04 12) y
+";
+        let out = compact_blame(raw, "src/y.rs", 0).unwrap();
+        assert_eq!(
+            out,
+            "3 lines · 2 commits · 2 authors\n\
+^1a2b3c4 Al 2026-01-02 L10-11\n\
+10│ x\n\
+11│\n\
+9f8e7d6c Bea Long Name 2026-03-04 L12\n\
+12│ y\n"
+        );
+    }
+
+    #[test]
+    fn test_compact_blame_rejects_unknown_shapes() {
+        // Default long date format: run_blame injects --date=short, so this
+        // only happens when the user forced another format → raw passthrough.
+        let long = "861a46de (Adrien Eppling 2026-06-23 21:53:35 +0200  1) //! x\n";
+        assert!(compact_blame(long, "f", 0).is_none());
+        let porcelain = "861a46de0000000000000000000000000000000000 1 1 3\nauthor Adrien\n";
+        assert!(compact_blame(porcelain, "f", 0).is_none());
+        assert!(compact_blame("", "f", 0).is_none());
+    }
+
+    #[test]
+    fn test_blame_target_skips_flag_values() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(blame_target(&a(&["src/main.rs"])), "src/main.rs");
+        assert_eq!(blame_target(&a(&["-L", "10,20", "-w", "src/main.rs"])), "src/main.rs");
+        assert_eq!(blame_target(&a(&["HEAD~3", "--", "src/main.rs"])), "src/main.rs");
+        assert_eq!(blame_target(&a(&["-L", "1,3"])), "<file>");
     }
 }

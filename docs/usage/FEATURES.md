@@ -509,6 +509,35 @@ rtk git worktree [add|remove|prune|list] [args...]
 
 ---
 
+### `rtk git blame` -- Blame groupe par commit
+
+```bash
+rtk git blame [-L a,b] [-w] [rev] [--] <fichier>
+```
+
+Les metadonnees que git repete sur chaque ligne (hash, auteur, date) sont
+affichees une fois par plage de lignes consecutives du meme commit ; le code est
+conserve integralement avec son numero de ligne. Premiere ligne : `N lines · K commits · A authors`.
+Borne a `limits.read_max_lines` lignes de code (2000 par defaut) avec la commande
+`git blame -L` exacte pour la suite. `--porcelain`, `-p`, `-s`, `-n`, `-t`, `--date=`
+et `--incremental` passent en clair.
+
+---
+
+### `rtk git grep` -- Grep du depot compact
+
+```bash
+rtk git grep [-i] [-w] [--cached] <motif> [-- <pathspec>...]
+```
+
+Meme filtre que `rtk grep` : regroupement par fichier, plafond global et par
+fichier, debordement dans le tee. `git grep` reste le moteur execute. Les formes
+que le filtre ne reproduit pas passent en clair : expressions booleennes
+(`--and/--or/--not`), contexte (`-A/-B/-C`), `-p`/`-W`, `--heading`, `--name-only`,
+`-l`/`-c`/`-o`, et les operandes de revision (`git grep foo HEAD~3`).
+
+---
+
 ### Passthrough git
 
 Toute sous-commande git non listee ci-dessus est executee directement :
