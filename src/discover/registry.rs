@@ -2950,6 +2950,36 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_python_unittest() {
+        for (cmd, expected) in [
+            ("python -m unittest", "rtk unittest"),
+            ("python3 -m unittest -v", "rtk unittest -v"),
+            (
+                "python3 -m unittest tests.test_bad",
+                "rtk unittest tests.test_bad",
+            ),
+            (
+                "python3 -m unittest discover -s tests",
+                "rtk unittest discover -s tests",
+            ),
+            (
+                "python3 -m unittest 2>&1 | tail -20",
+                "rtk unittest 2>&1 | tail -20",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("python3 -m unittests", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_dotnet_test() {
         assert_eq!(
             rewrite_command_no_prefixes("dotnet test --no-build", &[]),

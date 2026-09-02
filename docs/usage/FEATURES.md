@@ -701,6 +701,21 @@ rtk playwright [args...]
 
 ---
 
+### `rtk unittest` -- Tests Python (unittest)
+
+```bash
+rtk unittest [-v] [module|test id] [discover -s tests]   # python -m unittest
+```
+
+Seuls les blocs `FAIL:`/`ERROR:` sont conserves : nom du test, frame du test et
+frame de la levee (`chemin:ligne in fonction: source`), message d'exception et
+lignes de diff `-`/`+` (plafonnees). Les points de progression, les lignes
+`... ok` du mode verbeux, `Traceback`, les separateurs et les marqueurs `^~`
+disparaissent. Une ligne de resume termine : `FAILED: failures=2, errors=1 · 8 tests in 0.001s`
+ou `ok 5 tests in 0.000s (skipped=1)`.
+
+---
+
 ### `rtk pytest` -- Tests Python
 
 ```bash

@@ -627,6 +627,15 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
+        pattern: r"^python[0-9.]*\s+-m\s+unittest(\s|$)",
+        rtk_cmd: "rtk unittest",
+        pipeline_producer_safe: true,
+        rewrite_prefixes: &["python3 -m unittest", "python -m unittest"],
+        category: "Python",
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
         pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install|show)",
         rtk_cmd: "rtk pip",
         rewrite_prefixes: &["pip3", "pip", "uv pip"],
