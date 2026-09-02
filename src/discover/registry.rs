@@ -2826,6 +2826,106 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_yarn_subcommands_and_scripts() {
+        for (cmd, expected) in [
+            ("yarn", "rtk yarn"),
+            ("yarn --frozen-lockfile", "rtk yarn --frozen-lockfile"),
+            ("yarn install", "rtk yarn install"),
+            ("yarn add left-pad", "rtk yarn add left-pad"),
+            ("yarn remove left-pad", "rtk yarn remove left-pad"),
+            ("yarn test", "rtk yarn test"),
+            ("yarn build", "rtk yarn build"),
+            ("yarn run build", "rtk yarn run build"),
+            ("yarn typecheck", "rtk yarn typecheck"),
+            ("yarn test 2>&1 | tail -20", "rtk yarn test 2>&1 | tail -20"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        // Streaming scripts and unknown scripts stay raw.
+        for cmd in [
+            "yarn dev",
+            "yarn start",
+            "yarn run dev",
+            "yarn storybook",
+            "yarn my-script",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_yarn_tool_invocations_go_to_tool_filters() {
+        for (cmd, expected) in [
+            ("yarn vitest run", "rtk vitest"),
+            ("yarn run vitest", "rtk vitest"),
+            ("yarn tsc --noEmit", "rtk tsc --noEmit"),
+            ("yarn eslint .", "rtk lint ."),
+            ("yarn dlx prettier --check .", "rtk prettier --check ."),
+            ("yarn exec playwright test", "rtk playwright test"),
+            ("yarn jest --ci", "rtk jest --ci"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_bun_subcommands_and_scripts() {
+        for (cmd, expected) in [
+            ("bun install", "rtk bun install"),
+            ("bun i", "rtk bun i"),
+            ("bun add zod", "rtk bun add zod"),
+            ("bun test", "rtk bun test"),
+            ("bun test src/a.test.ts", "rtk bun test src/a.test.ts"),
+            ("bun run build", "rtk bun run build"),
+            ("bun run test", "rtk bun run test"),
+            ("bun x cowsay hi", "rtk bun x cowsay hi"),
+            ("bunx cowsay hi", "rtk bunx cowsay hi"),
+            ("bun test 2>&1 | tail -30", "rtk bun test 2>&1 | tail -30"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "bun dev",
+            "bun run dev",
+            "bun start",
+            "bun index.ts",
+            "bun --version",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_bun_tool_invocations_go_to_tool_filters() {
+        for (cmd, expected) in [
+            ("bun x tsc --noEmit", "rtk tsc --noEmit"),
+            ("bunx tsc --noEmit", "rtk tsc --noEmit"),
+            ("bunx vitest run", "rtk vitest"),
+            ("bun run vitest", "rtk vitest"),
+            ("bun run eslint src", "rtk lint src"),
+            ("bunx prisma generate", "rtk prisma generate"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
     fn test_rewrite_npm_lifecycle_and_install_subcommands() {
         for (cmd, expected) in [
             ("npm test", "rtk npm test"),

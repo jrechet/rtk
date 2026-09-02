@@ -895,6 +895,41 @@ Route intelligemment vers les filtres specialises :
 
 ---
 
+### `rtk yarn` -- yarn (classic et berry)
+
+```bash
+rtk yarn [install|add|remove|test|build|run <script>] [args...]
+```
+
+Supprime les bannieres de version, les etapes `[1/4] ...`, l'echo `$ commande`,
+`Done in`, et l'arbre `info All dependencies` (redondant avec les dependances
+directes). Les `warning` sont dedoublonnes et plafonnes a 10. Pour yarn berry,
+les lignes `YN0000` (structure, durees) disparaissent, les erreurs et le resume
+`YN0013` restent. Le hook reecrit les sous-commandes et scripts a sortie bornee ;
+`yarn dev`, `yarn start` et les scripts inconnus restent en clair. `yarn vitest`,
+`yarn tsc`, `yarn eslint`, `yarn dlx prettier` vont aux filtres d'outil.
+
+---
+
+### `rtk bun` / `rtk bunx` -- bun
+
+```bash
+rtk bun [install|add|remove|test|run <script>] [args...]
+rtk bunx <outil> [args...]
+```
+
+`bun install`/`add` : banniere, durees et `Saved lockfile` supprimes, liste
+`+ pkg@ver` plafonnee a 20, resume `N packages installed` conserve.
+`bun test` : seuls les echecs sont affiches, sous leur fichier, avec le message
+d'assertion, `Expected`/`Received` et au plus deux frames ; les extraits de source
+et les durees par test disparaissent. Une ligne de resume termine la sortie :
+`7 pass, 1 fail, 1 skip · 10 tests in 3 files [11ms]`. Tout passe : une seule ligne.
+`bun run <script>` : l'echo `$ commande` est retire, la sortie du script est intacte.
+`bun dev`, `bun start`, `bun fichier.ts` restent en clair ; `bun x tsc`, `bunx vitest`
+vont aux filtres d'outil.
+
+---
+
 ### `rtk pip` -- pip / uv
 
 ```bash

@@ -12,8 +12,8 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    bun_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd,
+    tsc_cmd, vitest_cmd, yarn_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
@@ -590,6 +590,27 @@ enum Commands {
     /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
     Npx {
         /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// yarn (classic and berry) with install/run boilerplate stripped
+    Yarn {
+        /// yarn arguments (subcommand or script + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// bun with install chatter stripped and `bun test` failures-only output
+    Bun {
+        /// bun arguments (install, add, test, run <script>, ...)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// bunx: run a package binary with bun boilerplate stripped
+    Bunx {
+        /// bunx arguments (command + options)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2396,6 +2417,9 @@ fn run_cli() -> Result<i32> {
         },
 
         Commands::Npm { args } => npm_cmd::run(&args, cli.verbose, cli.skip_env)?,
+        Commands::Yarn { args } => yarn_cmd::run(&args, cli.verbose)?,
+        Commands::Bun { args } => bun_cmd::run(&args, cli.verbose)?,
+        Commands::Bunx { args } => bun_cmd::exec(&args, cli.verbose)?,
 
         Commands::Curl { args } => curl_cmd::run(&args, cli.verbose)?,
 
@@ -2903,6 +2927,9 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }
+            | Commands::Yarn { .. }
+            | Commands::Bun { .. }
+            | Commands::Bunx { .. }
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
@@ -3306,6 +3333,9 @@ mod tests {
             "cargo",
             "npm",
             "npx",
+            "yarn",
+            "bun",
+            "bunx",
             "curl",
             "ruff",
             "pytest",

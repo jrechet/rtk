@@ -1,0 +1,9 @@
+bun add v1.3.11 (af24e281)
+Resolving... [69.16ms] migrated lockfile from yarn.lock
+Resolving dependencies
+Resolved, downloaded and extracted [10]
+Saved lockfile
+
+installed is-odd@3.0.1
+
+2 packages installed [333.00ms]

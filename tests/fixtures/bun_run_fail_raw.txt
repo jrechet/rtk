@@ -1,0 +1,2 @@
+$ node -e "console.error('boom'); process.exit(2)"
+boom
