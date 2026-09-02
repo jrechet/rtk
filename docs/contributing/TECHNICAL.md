@@ -144,14 +144,17 @@ rewrite_compound(cmd, excluded)                    [src/discover/registry.rs]
   |  Step 2 — Split on operators, rewrite each segment
   |  Operator (&&, ||, ;) → rewrite both sides
   |  Pipe (|) → keep producers/intermediate stages raw
-  |             rewrite only a pipeline-safe final stage
+  |             rewrite only a pipeline-safe final stage (grep/rg), or
+  |             the producer when every consumer is head/tail/cat and
+  |             the producer rule is pipeline_producer_safe
   |  Stderr pipe (|&) → keep the complete pipeline raw
   |  Shellism (&) → rewrite both sides (background)
   |
   |  Calls rewrite_segment() per segment:
   |    segment 1: "cargo fmt --all"
   |    segment 2: "cargo test 2>&1"
-  |    after pipe: "tail -20" kept raw
+  |    after pipe: "tail -20" kept raw (a pure line limiter, so the
+  |    producer "cargo test 2>&1" is rewritten as PipelineProducer)
   |
   v
 rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
@@ -186,7 +189,9 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
 classify_command(cmd)                              [src/discover/registry.rs]
   |  1. Check IGNORED_EXACT (cd, echo, fi, done, ...)
   |  2. Check IGNORED_PREFIXES (rtk, mkdir, mv, ...)
-  |  3. Strip env prefix with ENV_PREFIX regex (for pattern matching only)
+  |  3. Strip env prefix with ENV_PREFIX regex (for pattern matching only),
+  |     then process wrappers (PROCESS_WRAPPER: timeout N, time, nice, nohup,
+  |     stdbuf, ionice), then any env prefix the wrapper guarded
   |  4. Normalize absolute paths: /usr/bin/grep → grep
   |  5. Strip git global opts: git -C /tmp status → git status
   |  6. Guard: cat/head/tail with redirect (>, >>) → Unsupported (write, not read)
@@ -208,8 +213,9 @@ LLM Agent executes rewritten command
 Key design decisions:
 - **Lexer-based tokenization**: A single-pass state machine (`lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Used for both compound splitting and redirect stripping.
 - **Segment-level rewriting**: Compound commands are split by operators, each segment rewritten independently. Bash recombines them at execution time.
-- **Pipe semantics**: Producers and intermediate stages of `|` remain raw. Only an argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; initially this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. `|&` is recognized separately and its complete pipeline stays raw.
+- **Pipe semantics**: Producers and intermediate stages of `|` remain raw by default. An argument-safe final stage whose rule has `pipeline_final_safe` may be rewritten; this is limited to ordinary `grep` and `rg` invocations. Search pattern-file forms (`-f`/`--file`) defer because they can consume pipeline stdin as configuration. When every downstream stage is a pure line limiter (`head`, `tail`, `cat` with flags only, never `wc`), the producer is rewritten instead if its rule has `pipeline_producer_safe` — summary-shaped filters such as test runners, builds and linters, where `| tail -30` was only a size cap. Line-oriented rules (git, ls, find, grep, read, docker, gh, ...) are never producer-safe because head/tail select specific lines of their output. `|&` is recognized separately and its complete pipeline stays raw.
 - **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
+- **Process wrappers**: `timeout 30 cargo test`, `time cargo build`, `nice -n 10 make`, `nohup npm run build`, `stdbuf -oL pytest` and `ionice` are peeled the same way and re-prepended (`timeout 30 rtk cargo test`). A wrapper never falls through: if the inner command has no rewrite, the whole segment stays raw.
 - **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.
 
 ### 3.3 CLI Parsing and Routing
@@ -249,7 +255,8 @@ When Clap parsing fails (unknown command):
 1. Guard: check if the command is an RTK meta-command (`gain`, `init`, etc.) -- if so, show Clap error
 2. Look up TOML DSL filters via `toml_filter::find_matching_filter()`
 3. If TOML match: capture stdout, apply filter pipeline, track savings
-4. If no match: pure passthrough with `Stdio::inherit`, track as 0% output reduction
+4. If no match and stdout is not a terminal (an agent is reading): capture, compact losslessly (`core/passthrough.rs`: ANSI stripped, blank runs collapsed, consecutive duplicate lines folded as `line (×N)`), then cap at `limits.fallback_max_chars` keeping head and tail, with the middle teed to disk and a `[full output: …]` hint. If tee is unavailable the uncapped compact text is shown instead — never an unrecoverable truncation
+5. If no match and stdout is a terminal: pure passthrough with `Stdio::inherit`, track as 0% output reduction
 
 ```
 Command received
@@ -258,7 +265,8 @@ Command received
      -> No:  run_fallback()
               -> TOML filter match?
                  -> Yes: Capture stdout, apply filter, track savings
-                 -> No:  Passthrough (inherit stdio, track 0% reduction)
+                 -> No:  stdout is a pipe? Capture + compact + cap (core/passthrough)
+                         stdout is a TTY? Passthrough (inherit stdio, track 0% reduction)
 ```
 
 > **Details**: [`src/core/README.md`](../src/core/README.md) covers the TOML filter engine, filter pipeline stages, and trust-gated project filters.

@@ -125,6 +125,10 @@ rtk read <fichier> [options]
 rtk read - [options]          # Lecture depuis stdin
 ```
 
+Sans `--max-lines` ni `--tail-lines`, la sortie est bornee a `limits.read_max_lines`
+(2000 lignes par defaut, `0` = illimite) et se termine par la commande exacte qui
+affiche la suite (`sed -n '2001,N p' FICHIER`). Les fenetres explicites ne sont jamais bornees.
+
 **Options :**
 
 | Option | Court | Defaut | Description |
@@ -617,6 +621,18 @@ rtk cargo nextest [run|list|--lib] [args...]
 ```
 
 Filtre la sortie de `cargo nextest` pour n'afficher que les echecs.
+
+---
+
+### `rtk cargo run` -- Execution Rust
+
+```bash
+rtk cargo run [args...] [-- program-args...]
+```
+
+Supprime les lignes de progression de compilation (`Compiling`, `Finished`, `Running`)
+et les remplace par une ligne `[rtk: N crates compiled]`. La sortie du programme et les
+diagnostics du compilateur (warnings, erreurs) sont transmis tels quels, en streaming.
 
 ---
 

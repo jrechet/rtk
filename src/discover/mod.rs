@@ -38,6 +38,9 @@ struct SupportedBucket {
 struct UnsupportedBucket {
     count: usize,
     example: String,
+    /// Estimated tokens of raw output these invocations produced (bytes / 4),
+    /// summed from the tool_result lengths. What is actually being spent.
+    output_tokens: usize,
 }
 
 pub fn run(
@@ -164,9 +167,11 @@ pub fn run(
                             UnsupportedBucket {
                                 count: 0,
                                 example: part.to_string(),
+                                output_tokens: 0,
                             }
                         });
                         bucket.count += 1;
+                        bucket.output_tokens += ext_cmd.output_len.unwrap_or(0) / 4;
                     }
                     Classification::Ignored => {
                         // Check if it starts with "rtk "
@@ -236,11 +241,14 @@ pub fn run(
             base_command: base,
             count: bucket.count,
             example: bucket.example,
+            output_tokens: bucket.output_tokens,
         })
         .collect();
 
-    // Sort by count descending
-    unsupported.sort_by_key(|b| std::cmp::Reverse(b.count));
+    // Rank by what the command actually cost (raw output tokens), then by
+    // frequency: a `git blame` run 3 times at 20k tokens each matters more than
+    // a `date` run 50 times.
+    unsupported.sort_by_key(|b| std::cmp::Reverse((b.output_tokens, b.count)));
 
     // Build RTK_DISABLED examples sorted by frequency (top 5)
     let rtk_disabled_examples: Vec<String> = {

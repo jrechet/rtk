@@ -2,7 +2,7 @@
 
 use crate::core::args_utils;
 use crate::core::runner;
-use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
+use crate::core::stream::{BlockHandler, BlockStreamFilter, LineHandler, LineStreamFilter, StreamFilter};
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{join_with_overflow, resolved_command, truncate};
 use anyhow::Result;
@@ -20,6 +20,7 @@ pub enum CargoCommand {
     Check,
     Install,
     Nextest,
+    Run,
 }
 
 pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
@@ -30,6 +31,7 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
         CargoCommand::Check => run_check(args, verbose),
         CargoCommand::Install => run_install(args, verbose),
         CargoCommand::Nextest => run_nextest(args, verbose),
+        CargoCommand::Run => run_run(args, verbose),
     }
 }
 
@@ -381,6 +383,61 @@ fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         args,
         verbose,
         Box::new(BlockStreamFilter::new(CargoBuildHandler::with_label("build"))),
+    )
+}
+
+/// Cargo status prefixes emitted during the compile phase of `cargo run`.
+/// Cargo right-aligns them to 12 columns, so real program output almost never
+/// starts with one of these after trimming.
+const CARGO_RUN_PROGRESS_PREFIXES: &[&str] = &[
+    "Compiling ",
+    "Checking ",
+    "Downloading ",
+    "Downloaded ",
+    "Blocking waiting",
+    "Updating ",
+    "Locking ",
+    "Adding ",
+    "Removing ",
+    "Fresh ",
+    "Finished ",
+    "Running `",
+];
+
+/// `cargo run` streams the program's own output untouched and only drops the
+/// compile-phase progress lines. Diagnostics (warnings, errors) are kept raw so
+/// nothing the program or the compiler says about a failure is lost.
+struct CargoRunHandler {
+    compiled: usize,
+}
+
+impl LineHandler for CargoRunHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Compiling ") || trimmed.starts_with("Checking ") {
+            self.compiled += 1;
+            return true;
+        }
+        CARGO_RUN_PROGRESS_PREFIXES
+            .iter()
+            .any(|p| trimmed.starts_with(p))
+    }
+
+    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+        if self.compiled > 0 {
+            Some(format!("[rtk: {} crates compiled]\n", self.compiled))
+        } else {
+            None
+        }
+    }
+}
+
+fn run_run(args: &[String], verbose: u8) -> Result<i32> {
+    run_cargo_streamed(
+        "run",
+        args,
+        verbose,
+        Box::new(LineStreamFilter::new(CargoRunHandler { compiled: 0 })),
     )
 }
 
@@ -2855,5 +2912,49 @@ error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous err
             result
         );
         assert!(result.contains("could not compile"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_run_handler_drops_progress_keeps_program_output() {
+        let mut h = CargoRunHandler { compiled: 0 };
+        assert!(h.should_skip("   Compiling serde v1.0.200"));
+        assert!(h.should_skip("   Compiling rtk v0.42.4 (/home/user/rtk)"));
+        assert!(h.should_skip("    Finished dev [unoptimized + debuginfo] target(s) in 12.34s"));
+        assert!(h.should_skip("     Running `target/debug/rtk --version`"));
+        assert!(h.should_skip("    Blocking waiting for file lock on package cache"));
+        assert!(!h.should_skip("Server listening on 0.0.0.0:8080"));
+        assert!(!h.should_skip("warning: unused variable: `x`"));
+        assert!(!h.should_skip("error[E0425]: cannot find value `y` in this scope"));
+        assert!(!h.should_skip("Running migrations..."));
+        assert_eq!(h.compiled, 2);
+        assert_eq!(
+            h.format_summary(0, ""),
+            Some("[rtk: 2 crates compiled]\n".to_string())
+        );
+        let quiet = CargoRunHandler { compiled: 0 };
+        assert_eq!(quiet.format_summary(0, ""), None);
+    }
+
+    #[test]
+    fn test_cargo_run_stream_savings_on_cold_build() {
+        let mut raw = String::new();
+        for i in 0..120 {
+            raw.push_str(&format!("   Compiling crate{} v0.1.{}\n", i, i));
+        }
+        raw.push_str("    Finished dev [unoptimized + debuginfo] target(s) in 40.01s\n");
+        raw.push_str("     Running `target/debug/app`\n");
+        raw.push_str("hello from app\n");
+        let mut filter = LineStreamFilter::new(CargoRunHandler { compiled: 0 });
+        let mut out = String::new();
+        for line in raw.lines() {
+            if let Some(kept) = filter.feed_line(line) {
+                out.push_str(&kept);
+            }
+        }
+        if let Some(summary) = filter.on_exit(0, &raw) {
+            out.push_str(&summary);
+        }
+        assert_eq!(out, "hello from app\n[rtk: 120 crates compiled]\n");
+        assert!(out.len() * 10 < raw.len(), "expected >=90% savings");
     }
 }

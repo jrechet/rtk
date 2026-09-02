@@ -90,6 +90,8 @@ grep_max_per_file = 25
 status_max_files = 15
 status_max_untracked = 10
 passthrough_max_chars = 2000
+read_max_lines = 2000        # rtk read without --max-lines/--tail-lines; 0 = unlimited
+fallback_max_chars = 8000    # unknown-command passthrough when stdout is a pipe; 0 = unlimited
 ```
 
 ## Shared Utilities (utils.rs)

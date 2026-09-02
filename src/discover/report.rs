@@ -46,6 +46,8 @@ pub struct UnsupportedEntry {
     pub base_command: String,
     pub count: usize,
     pub example: String,
+    /// Estimated raw output tokens across all invocations (bytes / 4).
+    pub output_tokens: usize,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -179,24 +181,25 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
     // Unhandled
     if !report.unsupported.is_empty() {
-        out.push_str("\nTOP UNHANDLED COMMANDS -- open an issue?\n");
-        out.push_str(&"-".repeat(52));
+        out.push_str("\nTOP UNHANDLED COMMANDS (by output volume) -- open an issue?\n");
+        out.push_str(&"-".repeat(64));
         out.push('\n');
         out.push_str(&format!(
-            "{:<24} {:>5}    {}\n",
-            "Command", "Count", "Example"
+            "{:<24} {:>5} {:>10}    {}\n",
+            "Command", "Count", "Output", "Example"
         ));
 
         for entry in report.unsupported.iter().take(limit) {
             out.push_str(&format!(
-                "{:<24} {:>5}    {}\n",
+                "{:<24} {:>5} {:>10}    {}\n",
                 truncate_str(&entry.base_command, 23),
                 entry.count,
+                format!("~{}", format_tokens(entry.output_tokens)),
                 truncate_str(&entry.example, 40),
             ));
         }
 
-        out.push_str(&"-".repeat(52));
+        out.push_str(&"-".repeat(64));
         out.push('\n');
         out.push_str("-> github.com/rtk-ai/rtk/issues\n");
     }
@@ -372,6 +375,26 @@ mod tests {
             "Expected Hermes installed note in output but got:\n{}",
             output
         );
+    }
+
+    #[test]
+    fn test_format_text_unsupported_shows_output_volume() {
+        let mut report = make_report(0, 0);
+        report.unsupported.push(UnsupportedEntry {
+            base_command: "git blame".to_string(),
+            count: 3,
+            example: "git blame src/main.rs".to_string(),
+            output_tokens: 61_500,
+        });
+
+        let output = format_text(&report, 10, false);
+        assert!(output.contains("by output volume"), "{output}");
+        assert!(output.contains("Output"), "{output}");
+        assert!(output.contains("~61.5K tokens"), "{output}");
+
+        let json = format_json(&report);
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(json["unsupported"][0]["output_tokens"], 61_500);
     }
 
     #[test]
