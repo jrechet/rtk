@@ -8,13 +8,15 @@ use crate::core::stream::{
     LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
-use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
+use crate::core::truncate::{CAP_INVENTORY, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{
     exit_code_from_status, join_with_overflow, resolved_command, strip_ansi,
 };
 use anyhow::{Context, Result};
+use regex::Regex;
 use std::ffi::OsString;
 use std::process::Command;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -31,6 +33,16 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    Blame,
+    Switch,
+    Restore,
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Reset,
+    Tag,
+    LsFiles,
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -106,6 +118,16 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::Blame => run_blame(args, verbose, global_args),
+        GitCommand::Switch => run_switch(args, verbose, global_args),
+        GitCommand::Restore => run_restore(args, verbose, global_args),
+        GitCommand::Merge => run_history_op("merge", args, verbose, global_args),
+        GitCommand::Rebase => run_history_op("rebase", args, verbose, global_args),
+        GitCommand::CherryPick => run_history_op("cherry-pick", args, verbose, global_args),
+        GitCommand::Revert => run_history_op("revert", args, verbose, global_args),
+        GitCommand::Reset => run_reset(args, verbose, global_args),
+        GitCommand::Tag => run_tag(args, verbose, global_args),
+        GitCommand::LsFiles => run_ls_files(args, verbose, global_args),
     }
 }
 
@@ -1948,43 +1970,9 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         {
             "ok (up-to-date)".to_string()
         } else {
-            // Count files changed
-            let mut files = 0;
-            let mut insertions = 0;
-            let mut deletions = 0;
-
-            for line in result.stdout.lines() {
-                if line.contains("file") && line.contains("changed") {
-                    // Parse "3 files changed, 10 insertions(+), 2 deletions(-)"
-                    for part in line.split(',') {
-                        let part = part.trim();
-                        if part.contains("file") {
-                            files = part
-                                .split_whitespace()
-                                .next()
-                                .and_then(|n| n.parse().ok())
-                                .unwrap_or(0);
-                        } else if part.contains("insertion") {
-                            insertions = part
-                                .split_whitespace()
-                                .next()
-                                .and_then(|n| n.parse().ok())
-                                .unwrap_or(0);
-                        } else if part.contains("deletion") {
-                            deletions = part
-                                .split_whitespace()
-                                .next()
-                                .and_then(|n| n.parse().ok())
-                                .unwrap_or(0);
-                        }
-                    }
-                }
-            }
-
-            if files > 0 {
-                format!("ok {} files +{} -{}", files, insertions, deletions)
-            } else {
-                "ok".to_string()
+            match diffstat_summary(&result.stdout) {
+                Some(summary) => format!("ok {}", summary),
+                None => "ok".to_string(),
             }
         };
 
@@ -2627,6 +2615,629 @@ fn filter_worktree_list(output: &str) -> String {
         }
     }
     result.join("\n")
+}
+
+// --- git blame ---
+
+/// Flags whose output shape rtk does not compact: machine formats, header
+/// field toggles and alternate date formats. They pass through verbatim.
+const BLAME_PASSTHROUGH_FLAGS: &[&str] = &[
+    "--porcelain",
+    "--line-porcelain",
+    "--incremental",
+    "-p",
+    "-s",
+    "-n",
+    "--show-number",
+    "-c",
+    "--show-stats",
+    "-t",
+    "--score-debug",
+];
+
+/// Flags that consume the next argument, so it is not the blamed path.
+const BLAME_VALUE_FLAGS: &[&str] = &[
+    "-L",
+    "-S",
+    "--contents",
+    "--since",
+    "--ignore-rev",
+    "--ignore-revs-file",
+    "--date",
+    "--abbrev",
+];
+
+/// One `git blame --date=short` line: `hash [file] (author YYYY-MM-DD  N) code`.
+static BLAME_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(\^?[0-9a-f]{4,40})(?: (\S+))? \((.+?) (\d{4}-\d{2}-\d{2}) +(\d+)\) ?(.*)$")
+        .unwrap()
+});
+
+/// Consecutive lines attributed to the same commit.
+struct BlameRun {
+    hash: String,
+    author: String,
+    date: String,
+    lines: Vec<(usize, String)>,
+}
+
+fn run_blame(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let args = &args_utils::restore_double_dash(args);
+
+    if verbose > 0 {
+        eprintln!("git blame {}", args.join(" "));
+    }
+
+    let raw_shape = args.iter().any(|a| {
+        BLAME_PASSTHROUGH_FLAGS.contains(&a.as_str()) || a.starts_with("--date=")
+    });
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("blame");
+    if !raw_shape {
+        // Short dates are what the compact form prints; the long form (with
+        // time and zone) is only ever noise for an agent.
+        cmd.arg("--date=short");
+    }
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run git blame")?;
+    let label = format!("git blame {}", args.join(" "));
+
+    if !result.stderr.trim().is_empty() {
+        eprint!("{}", result.stderr);
+    }
+    if !result.success() {
+        print!("{}", result.stdout);
+        timer.track(&label, &format!("rtk {}", label), &result.stdout, &result.stdout);
+        return Ok(result.exit_code);
+    }
+
+    let raw = &result.stdout;
+    let compacted = if raw_shape {
+        None
+    } else {
+        let cap = crate::core::config::limits().read_max_lines;
+        compact_blame(raw, &blame_target(args), cap)
+    };
+    let shown = match compacted.as_deref() {
+        Some(compact) => never_worse(raw, compact),
+        None => raw.as_str(),
+    };
+    print!("{}", shown);
+    timer.track(&label, &format!("rtk {}", label), raw, shown);
+    Ok(0)
+}
+
+/// The blamed path: the last positional that is not the value of a flag.
+fn blame_target(args: &[String]) -> String {
+    let mut skip_next = false;
+    let mut target = None;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if BLAME_VALUE_FLAGS.contains(&arg.as_str()) {
+            skip_next = true;
+            continue;
+        }
+        if arg == "--" || arg.starts_with('-') {
+            continue;
+        }
+        target = Some(arg.clone());
+    }
+    target.unwrap_or_else(|| "<file>".to_string())
+}
+
+/// Group blame lines by consecutive commit: one `hash author date Lstart-end`
+/// header per run, then the code lines with their line number. Metadata that
+/// git repeats on every line is printed once per run; the code stays intact.
+/// Bounded at `cap` code lines (0 = unlimited) with the exact `git blame -L`
+/// command for the rest. Returns `None` when a line does not parse, so the
+/// caller shows the raw output instead.
+pub(crate) fn compact_blame(raw: &str, source: &str, cap: usize) -> Option<String> {
+    let clean = strip_ansi(raw);
+    let mut runs: Vec<BlameRun> = Vec::new();
+    for line in clean.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let caps = BLAME_LINE_RE.captures(line)?;
+        let hash = caps[1].to_string();
+        let author = caps[3].trim().to_string();
+        let date = caps[4].to_string();
+        let lineno: usize = caps[5].parse().ok()?;
+        let code = caps
+            .get(6)
+            .map(|m| m.as_str().trim_end())
+            .unwrap_or("")
+            .to_string();
+        match runs.last_mut() {
+            Some(run) if run.hash == hash => run.lines.push((lineno, code)),
+            _ => runs.push(BlameRun {
+                hash,
+                author,
+                date,
+                lines: vec![(lineno, code)],
+            }),
+        }
+    }
+    if runs.is_empty() {
+        return None;
+    }
+
+    let total: usize = runs.iter().map(|r| r.lines.len()).sum();
+    let commits = runs
+        .iter()
+        .map(|r| r.hash.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let authors = runs
+        .iter()
+        .map(|r| r.author.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let first_line = runs[0].lines[0].0;
+    let last_line = runs
+        .iter()
+        .flat_map(|r| r.lines.iter().map(|(n, _)| *n))
+        .max()
+        .unwrap_or(first_line);
+    let width = last_line.to_string().len();
+
+    let mut out = format!(
+        "{} lines · {} {} · {} {}\n",
+        total,
+        commits,
+        pluralize(commits, "commit", "commits"),
+        authors,
+        pluralize(authors, "author", "authors"),
+    );
+    let mut shown = 0usize;
+    let mut last_shown = first_line;
+    let mut truncated = false;
+    'runs: for run in &runs {
+        if cap > 0 && shown >= cap {
+            truncated = true;
+            break;
+        }
+        let start = run.lines[0].0;
+        let end = run.lines[run.lines.len() - 1].0;
+        let range = if start == end {
+            format!("L{}", start)
+        } else {
+            format!("L{}-{}", start, end)
+        };
+        out.push_str(&format!(
+            "{} {} {} {}\n",
+            run.hash, run.author, run.date, range
+        ));
+        for (n, code) in &run.lines {
+            if cap > 0 && shown >= cap {
+                truncated = true;
+                break 'runs;
+            }
+            if code.is_empty() {
+                out.push_str(&format!("{:>width$}│\n", n, width = width));
+            } else {
+                out.push_str(&format!("{:>width$}│ {}\n", n, code, width = width));
+            }
+            shown += 1;
+            last_shown = *n;
+        }
+    }
+    if truncated {
+        out.push_str(&format!(
+            "[rtk: lines {}-{} of {} shown; remaining: git blame -L {},{} {}]\n",
+            first_line,
+            last_shown,
+            total,
+            last_shown + 1,
+            last_line,
+            source
+        ));
+    }
+    Some(out)
+}
+
+// --- git switch / restore / merge / rebase / cherry-pick / revert / reset / tag / ls-files ---
+
+/// `3 files changed, 10 insertions(+), 2 deletions(-)` → `3 files +10 -2`.
+/// Returns `None` when the text carries no diffstat summary line.
+fn diffstat_summary(text: &str) -> Option<String> {
+    let line = text
+        .lines()
+        .find(|l| l.contains("file") && l.contains("changed"))?;
+    let mut files = 0usize;
+    let mut insertions = 0usize;
+    let mut deletions = 0usize;
+    for part in line.split(',') {
+        let part = part.trim();
+        let n: usize = part
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        if part.contains("file") {
+            files = n;
+        } else if part.contains("insertion") {
+            insertions = n;
+        } else if part.contains("deletion") {
+            deletions = n;
+        }
+    }
+    (files > 0).then(|| {
+        format!(
+            "{} {} +{} -{}",
+            files,
+            pluralize(files, "file", "files"),
+            insertions,
+            deletions
+        )
+    })
+}
+
+/// Flags that open an editor or an interactive prompt: the subcommand must
+/// keep the terminal, so rtk passes it through untouched.
+fn wants_terminal(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-i" | "--interactive" | "-p" | "--patch" | "-e" | "--edit"
+        )
+    })
+}
+
+fn run_passthrough_strs(
+    subcommand: &str,
+    args: &[String],
+    global_args: &[String],
+    verbose: u8,
+) -> Result<i32> {
+    let mut all: Vec<OsString> = Vec::with_capacity(args.len() + 1);
+    all.push(OsString::from(subcommand));
+    all.extend(args.iter().map(OsString::from));
+    run_passthrough(&all, global_args, verbose)
+}
+
+/// `git switch` prints the same messages as `git checkout`, so it shares its
+/// formatter: `ok main`, `ok feature (new)`, `ok HEAD abc1234`.
+fn run_switch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let args = args_utils::restore_double_dash(args);
+    if verbose > 0 {
+        eprintln!("git switch");
+    }
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("switch");
+    cmd.args(&args);
+    let args_display = args.join(" ");
+    let args_for_filter = args.clone();
+    runner::run_filtered_with_exit(
+        cmd,
+        "git switch",
+        &args_display,
+        move |raw, exit_code| format_checkout_output(&args_for_filter, raw, exit_code),
+        RunOptions::with_tee("git_switch"),
+    )
+}
+
+/// `git restore` is silent on success; report what was asked for.
+fn run_restore(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    if wants_terminal(args) {
+        return run_passthrough_strs("restore", args, global_args, verbose);
+    }
+    let args = args_utils::restore_double_dash(args);
+    if verbose > 0 {
+        eprintln!("git restore");
+    }
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("restore");
+    cmd.args(&args);
+    let args_display = args.join(" ");
+    let paths = restore_path_count(&args);
+    runner::run_filtered_with_exit(
+        cmd,
+        "git restore",
+        &args_display,
+        move |raw, exit_code| {
+            if exit_code != 0 {
+                return raw.trim().to_string();
+            }
+            match paths {
+                0 => "ok".to_string(),
+                n => format!("ok {} {} restored", n, pluralize(n, "path", "paths")),
+            }
+        },
+        RunOptions::with_tee("git_restore"),
+    )
+}
+
+/// Positional pathspecs of `git restore`, skipping the values of `-s`/`--source`.
+fn restore_path_count(args: &[String]) -> usize {
+    let mut skip_next = false;
+    let mut count = 0;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "-s" || arg == "--source" {
+            skip_next = true;
+            continue;
+        }
+        if arg == "--" || arg.starts_with('-') {
+            continue;
+        }
+        count += 1;
+    }
+    count
+}
+
+/// merge / rebase / cherry-pick / revert: one `ok …` line on success, and on
+/// failure the conflicts without git's `hint:` coaching.
+fn run_history_op(
+    subcommand: &'static str,
+    args: &[String],
+    verbose: u8,
+    global_args: &[String],
+) -> Result<i32> {
+    if wants_terminal(args) {
+        return run_passthrough_strs(subcommand, args, global_args, verbose);
+    }
+    if verbose > 0 {
+        eprintln!("git {}", subcommand);
+    }
+    let mut cmd = git_cmd(global_args);
+    cmd.arg(subcommand);
+    cmd.args(args);
+    let args_display = args.join(" ");
+    let label = format!("git {}", subcommand);
+    let tee_label = format!("git_{}", subcommand.replace('-', "_"));
+    runner::run_filtered_with_exit(
+        cmd,
+        &label,
+        &args_display,
+        move |raw, exit_code| format_history_op(subcommand, raw, exit_code),
+        RunOptions::with_tee(&tee_label),
+    )
+}
+
+static REBASE_PROGRESS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Rebasing \(\d+/\d+\)").unwrap());
+
+pub(crate) fn format_history_op(subcommand: &str, raw: &str, exit_code: i32) -> String {
+    let clean = strip_ansi(raw);
+    if exit_code == 0 {
+        let stat = diffstat_summary(&clean);
+        let with_stat = |head: String| match &stat {
+            Some(stat) => format!("{} {}", head, stat),
+            None => head,
+        };
+        for line in clean.lines().map(str::trim) {
+            if line.starts_with("Already up to date")
+                || line.starts_with("Already up-to-date")
+                || (line.starts_with("Current branch ") && line.ends_with("is up to date."))
+            {
+                return "ok (up-to-date)".to_string();
+            }
+            if let Some(rest) = line.strip_prefix("Successfully rebased and updated ") {
+                let branch = rest
+                    .trim_end_matches('.')
+                    .trim_start_matches("refs/heads/");
+                return format!("ok rebased {}", branch);
+            }
+            if line == "Fast-forward" {
+                return with_stat("ok (fast-forward)".to_string());
+            }
+            if line.starts_with("Merge made by") {
+                return with_stat("ok merge".to_string());
+            }
+            if line.starts_with('[') && line.contains(']') {
+                return with_stat(parse_commit_output(line));
+            }
+        }
+        let kept: Vec<&str> = clean
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("hint:"))
+            .collect();
+        return if kept.is_empty() {
+            "ok".to_string()
+        } else {
+            kept.join("\n")
+        };
+    }
+
+    let mut conflicts = 0usize;
+    let mut kept: Vec<String> = Vec::new();
+    for line in clean.lines() {
+        let line = REBASE_PROGRESS.replace(line, "");
+        let t = line.trim();
+        if t.is_empty()
+            || t.starts_with("hint:")
+            || t.starts_with("Auto-merging ")
+            || t.starts_with("Automatic merge failed")
+            || t.starts_with("Recorded preimage")
+        {
+            continue;
+        }
+        if t.starts_with("CONFLICT") {
+            conflicts += 1;
+        }
+        kept.push(t.to_string());
+    }
+    let header = if conflicts > 0 {
+        format!(
+            "FAILED: git {} — {} {}",
+            subcommand,
+            conflicts,
+            pluralize(conflicts, "conflict", "conflicts")
+        )
+    } else {
+        format!("FAILED: git {}", subcommand)
+    };
+    if kept.is_empty() {
+        header
+    } else {
+        format!("{}\n{}", header, kept.join("\n"))
+    }
+}
+
+/// `git reset`: `ok HEAD abc1234 msg` for a hard/soft reset, a capped list of
+/// the paths left unstaged for a mixed reset, `ok` when git says nothing.
+fn run_reset(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    if wants_terminal(args) {
+        return run_passthrough_strs("reset", args, global_args, verbose);
+    }
+    let args = args_utils::restore_double_dash(args);
+    if verbose > 0 {
+        eprintln!("git reset");
+    }
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("reset");
+    cmd.args(&args);
+    let args_display = args.join(" ");
+    runner::run_filtered_with_exit(
+        cmd,
+        "git reset",
+        &args_display,
+        format_reset_output,
+        RunOptions::with_tee("git_reset"),
+    )
+}
+
+pub(crate) fn format_reset_output(raw: &str, exit_code: i32) -> String {
+    let clean = strip_ansi(raw);
+    if exit_code != 0 {
+        return clean.trim().to_string();
+    }
+    let mut lines = clean.lines().map(str::trim_end).filter(|l| !l.trim().is_empty());
+    let Some(first) = lines.next() else {
+        return "ok".to_string();
+    };
+    if let Some(rest) = first.trim().strip_prefix("HEAD is now at ") {
+        return format!("ok HEAD {}", rest);
+    }
+    if first.trim().starts_with("Unstaged changes after reset:") {
+        let rows: Vec<String> = lines
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        let mut out = format!(
+            "ok {} unstaged {}",
+            rows.len(),
+            pluralize(rows.len(), "change", "changes")
+        );
+        for row in rows.iter().take(CAP_LIST) {
+            out.push_str("\n  ");
+            out.push_str(row);
+        }
+        if rows.len() > CAP_LIST {
+            out.push_str(&format!("\n  +{} more", rows.len() - CAP_LIST));
+        }
+        return out;
+    }
+    clean.trim().to_string()
+}
+
+/// `git tag`: a list is capped at `CAP_INVENTORY`; creating or deleting a tag
+/// answers `ok` (git is silent) or git's own one-liner.
+fn run_tag(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    if verbose > 0 {
+        eprintln!("git tag");
+    }
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("tag");
+    cmd.args(args);
+    let args_display = args.join(" ");
+    let listing = tag_is_listing(args);
+    runner::run_filtered_with_exit(
+        cmd,
+        "git tag",
+        &args_display,
+        move |raw, exit_code| format_tag_output(raw, exit_code, listing),
+        RunOptions::with_tee("git_tag"),
+    )
+}
+
+fn tag_is_listing(args: &[String]) -> bool {
+    let has_positional = args.iter().any(|a| !a.starts_with('-'));
+    let list_flag = args.iter().any(|a| {
+        a == "-l"
+            || a == "--list"
+            || a.starts_with("-n")
+            || a.starts_with("--sort")
+            || a.starts_with("--contains")
+            || a.starts_with("--points-at")
+            || a.starts_with("--merged")
+    });
+    list_flag || !has_positional
+}
+
+pub(crate) fn format_tag_output(raw: &str, exit_code: i32, listing: bool) -> String {
+    let clean = strip_ansi(raw);
+    if exit_code != 0 {
+        return clean.trim().to_string();
+    }
+    if !listing {
+        let t = clean.trim();
+        return if t.is_empty() { "ok".to_string() } else { t.to_string() };
+    }
+    let rows: Vec<&str> = clean.lines().filter(|l| !l.trim().is_empty()).collect();
+    if rows.len() <= CAP_INVENTORY {
+        return rows.join("\n");
+    }
+    let mut out: Vec<String> = rows.iter().take(CAP_INVENTORY).map(|r| r.to_string()).collect();
+    out.push(format!(
+        "+{} more tags ({} total)",
+        rows.len() - CAP_INVENTORY,
+        rows.len()
+    ));
+    out.join("\n")
+}
+
+/// `git ls-files`: the first `CAP_INVENTORY` paths, the rest teed with a hint.
+fn run_ls_files(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    if verbose > 0 {
+        eprintln!("git ls-files");
+    }
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("ls-files");
+    cmd.args(args);
+    let result = exec_capture(&mut cmd).context("Failed to run git ls-files")?;
+    let label = format!("git ls-files {}", args.join(" "));
+    if !result.stderr.trim().is_empty() {
+        eprint!("{}", result.stderr);
+    }
+    if !result.success() {
+        print!("{}", result.stdout);
+        return Ok(result.exit_code);
+    }
+    let raw = &result.stdout;
+    let rows: Vec<&str> = raw.lines().collect();
+    let shown = if rows.len() <= CAP_INVENTORY {
+        raw.clone()
+    } else {
+        let mut out = rows[..CAP_INVENTORY].join("\n");
+        out.push('\n');
+        let hint = crate::core::tee::force_tee_hint(raw, "git_ls_files")
+            .map(|h| format!(" {}", h))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "+{} more files ({} total){}\n",
+            rows.len() - CAP_INVENTORY,
+            rows.len(),
+            hint
+        ));
+        never_worse(raw, &out).to_string()
+    };
+    print!("{}", shown);
+    timer.track(&label, &format!("rtk {}", label), raw, &shown);
+    Ok(0)
 }
 
 /// Runs an unsupported git subcommand by passing it through directly
@@ -4716,5 +5327,255 @@ To https://github.com/foo/bar.git
             input_tokens,
             output_tokens
         );
+    }
+
+    // --- git blame ---
+
+    const BLAME_FIXTURE: &str = include_str!("../../../tests/fixtures/git_blame_short_raw.txt");
+
+    #[test]
+    fn test_compact_blame_groups_runs_and_keeps_every_code_line() {
+        let out = compact_blame(BLAME_FIXTURE, "src/core/runner.rs", 0).expect("parses");
+        let raw_lines = BLAME_FIXTURE.lines().count();
+        let code_lines = out.lines().filter(|l| l.contains('│')).count();
+        assert_eq!(code_lines, raw_lines, "every blamed line is shown");
+        assert!(out.starts_with(&format!("{} lines · ", raw_lines)), "{out}");
+
+        let header_re = Regex::new(r"^\^?[0-9a-f]{4,40} .+ \d{4}-\d{2}-\d{2} L\d+(-\d+)?$").unwrap();
+        let headers: Vec<&str> = out
+            .lines()
+            .skip(1)
+            .filter(|l| !l.contains('│'))
+            .collect();
+        assert!(!headers.is_empty());
+        for h in &headers {
+            assert!(header_re.is_match(h), "bad run header: {h}");
+        }
+        // Consecutive headers never share a hash: runs are maximal.
+        for pair in headers.windows(2) {
+            let a = pair[0].split(' ').next().unwrap();
+            let b = pair[1].split(' ').next().unwrap();
+            assert_ne!(a, b, "adjacent runs must differ: {}", pair[0]);
+        }
+        // The first code line of the fixture survives verbatim (with its number).
+        let first_code = BLAME_FIXTURE.lines().next().unwrap().split(") ").nth(1).unwrap();
+        assert!(out.contains(&format!("1│ {}", first_code)), "{out}");
+    }
+
+    #[test]
+    fn test_compact_blame_savings_on_real_fixture() {
+        let out = compact_blame(BLAME_FIXTURE, "src/core/runner.rs", 0).expect("parses");
+        let savings = 100.0 - (out.len() as f64 / BLAME_FIXTURE.len() as f64 * 100.0);
+        // The code itself is ~39% of the raw bytes in this fixture, so the
+        // ceiling for a form that keeps every code line is ~61%. Repeated
+        // hash/author/date metadata is what goes away.
+        assert!(savings >= 40.0, "expected >=40% savings, got {:.1}%", savings);
+    }
+
+    #[test]
+    fn test_compact_blame_caps_with_resume_command() {
+        let raw = "\
+abc12345 (Jane Doe 2026-01-02  1) fn a() {}
+abc12345 (Jane Doe 2026-01-02  2) fn b() {}
+def67890 (John Roe 2026-02-03  3) fn c() {}
+def67890 (John Roe 2026-02-03  4) fn d() {}
+def67890 (John Roe 2026-02-03  5) fn e() {}
+";
+        let out = compact_blame(raw, "src/x.rs", 3).unwrap();
+        assert_eq!(
+            out,
+            "5 lines · 2 commits · 2 authors\n\
+abc12345 Jane Doe 2026-01-02 L1-2\n\
+1│ fn a() {}\n\
+2│ fn b() {}\n\
+def67890 John Roe 2026-02-03 L3-5\n\
+3│ fn c() {}\n\
+[rtk: lines 1-3 of 5 shown; remaining: git blame -L 4,5 src/x.rs]\n"
+        );
+        // Unlimited and exactly-at-cap are not truncated.
+        assert!(!compact_blame(raw, "src/x.rs", 0).unwrap().contains("[rtk:"));
+        assert!(!compact_blame(raw, "src/x.rs", 5).unwrap().contains("[rtk:"));
+    }
+
+    #[test]
+    fn test_compact_blame_single_line_run_and_padding() {
+        let raw = "\
+^1a2b3c4 (Al      2026-01-02 10) x
+^1a2b3c4 (Al      2026-01-02 11) 
+9f8e7d6c src/y.rs (Bea Long Name 2026-03-04 12) y
+";
+        let out = compact_blame(raw, "src/y.rs", 0).unwrap();
+        assert_eq!(
+            out,
+            "3 lines · 2 commits · 2 authors\n\
+^1a2b3c4 Al 2026-01-02 L10-11\n\
+10│ x\n\
+11│\n\
+9f8e7d6c Bea Long Name 2026-03-04 L12\n\
+12│ y\n"
+        );
+    }
+
+    #[test]
+    fn test_compact_blame_rejects_unknown_shapes() {
+        // Default long date format: run_blame injects --date=short, so this
+        // only happens when the user forced another format → raw passthrough.
+        let long = "861a46de (Adrien Eppling 2026-06-23 21:53:35 +0200  1) //! x\n";
+        assert!(compact_blame(long, "f", 0).is_none());
+        let porcelain = "861a46de0000000000000000000000000000000000 1 1 3\nauthor Adrien\n";
+        assert!(compact_blame(porcelain, "f", 0).is_none());
+        assert!(compact_blame("", "f", 0).is_none());
+    }
+
+    #[test]
+    fn test_blame_target_skips_flag_values() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(blame_target(&a(&["src/main.rs"])), "src/main.rs");
+        assert_eq!(blame_target(&a(&["-L", "10,20", "-w", "src/main.rs"])), "src/main.rs");
+        assert_eq!(blame_target(&a(&["HEAD~3", "--", "src/main.rs"])), "src/main.rs");
+        assert_eq!(blame_target(&a(&["-L", "1,3"])), "<file>");
+    }
+
+    // --- git switch / merge / rebase / reset / tag ---
+
+    #[test]
+    fn test_diffstat_summary() {
+        assert_eq!(
+            diffstat_summary(" f3.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"),
+            Some("1 file +1 -1".to_string())
+        );
+        assert_eq!(
+            diffstat_summary(" 3 files changed, 10 insertions(+), 2 deletions(-)"),
+            Some("3 files +10 -2".to_string())
+        );
+        assert_eq!(diffstat_summary(" 2 files changed, 4 deletions(-)"), Some("2 files +0 -4".into()));
+        assert_eq!(diffstat_summary("nothing here"), None);
+    }
+
+    #[test]
+    fn test_history_op_success_shapes() {
+        // Real outputs from a scratch repository.
+        assert_eq!(
+            format_history_op(
+                "merge",
+                "Merge made by the 'ort' strategy.\n f3.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n",
+                0
+            ),
+            "ok merge 1 file +1 -1"
+        );
+        assert_eq!(
+            format_history_op(
+                "merge",
+                "Updating 3b9a7d1..84fdef3\nFast-forward\n f1.txt | 2 +-\n f4.txt | 1 +\n 2 files changed, 2 insertions(+), 1 deletion(-)\n",
+                0
+            ),
+            "ok (fast-forward) 2 files +2 -1"
+        );
+        assert_eq!(format_history_op("merge", "Already up to date.\n", 0), "ok (up-to-date)");
+        assert_eq!(
+            format_history_op("rebase", "Successfully rebased and updated refs/heads/feature.\n", 0),
+            "ok rebased feature"
+        );
+        assert_eq!(
+            format_history_op("rebase", "Current branch feature is up to date.\n", 0),
+            "ok (up-to-date)"
+        );
+        assert_eq!(
+            format_history_op(
+                "cherry-pick",
+                "[main 1239525] other\n Date: Wed Sep 2 14:09:55 2026 +0000\n 1 file changed, 1 insertion(+), 1 deletion(-)\n",
+                0
+            ),
+            "ok 1239525 1 file +1 -1"
+        );
+        assert_eq!(format_history_op("revert", "", 0), "ok");
+    }
+
+    #[test]
+    fn test_history_op_conflicts_drop_hints() {
+        let merge = "Auto-merging f1.txt\nCONFLICT (content): Merge conflict in f1.txt\nAutomatic merge failed; fix conflicts and then commit the result.\n";
+        assert_eq!(
+            format_history_op("merge", merge, 1),
+            "FAILED: git merge — 1 conflict\nCONFLICT (content): Merge conflict in f1.txt"
+        );
+        let rebase = "\
+Rebasing (1/1)Auto-merging f1.txt
+CONFLICT (content): Merge conflict in f1.txt
+error: could not apply 84fdef3... feature work
+hint: Resolve all conflicts manually, mark them as resolved with
+hint: \"git add/rm <conflicted_files>\", then run \"git rebase --continue\".
+hint: You can instead skip this commit: run \"git rebase --skip\".
+hint: To abort and get back to the state before \"git rebase\", run \"git rebase --abort\".
+Could not apply 84fdef3... feature work
+";
+        let out = format_history_op("rebase", rebase, 1);
+        assert_eq!(
+            out,
+            "FAILED: git rebase — 1 conflict\n\
+CONFLICT (content): Merge conflict in f1.txt\n\
+error: could not apply 84fdef3... feature work\n\
+Could not apply 84fdef3... feature work"
+        );
+        assert!(out.len() * 2 < rebase.len(), "expected >=50% savings on conflict output");
+        assert_eq!(
+            format_history_op("merge", "fatal: refusing to merge unrelated histories\n", 128),
+            "FAILED: git merge\nfatal: refusing to merge unrelated histories"
+        );
+    }
+
+    #[test]
+    fn test_reset_output_shapes() {
+        assert_eq!(
+            format_reset_output("HEAD is now at 3b9a7d1 main work\n", 0),
+            "ok HEAD 3b9a7d1 main work"
+        );
+        assert_eq!(
+            format_reset_output("Unstaged changes after reset:\nM\tf1.txt\nM\tf2.txt\n", 0),
+            "ok 2 unstaged changes\n  M f1.txt\n  M f2.txt"
+        );
+        let mut many = String::from("Unstaged changes after reset:\n");
+        for i in 0..25 {
+            many.push_str(&format!("M\tf{}.txt\n", i));
+        }
+        let out = format_reset_output(&many, 0);
+        assert!(out.starts_with("ok 25 unstaged changes\n"));
+        assert!(out.ends_with("  +5 more"), "{out}");
+        assert_eq!(format_reset_output("", 0), "ok");
+        assert_eq!(
+            format_reset_output("fatal: ambiguous argument 'nope'\n", 128),
+            "fatal: ambiguous argument 'nope'"
+        );
+    }
+
+    #[test]
+    fn test_tag_output_shapes() {
+        assert_eq!(format_tag_output("v1.0.0\nv1.1.0\n", 0, true), "v1.0.0\nv1.1.0");
+        assert_eq!(format_tag_output("", 0, false), "ok");
+        assert_eq!(
+            format_tag_output("Deleted tag 'v1.0.0' (was 3b9a7d1)\n", 0, false),
+            "Deleted tag 'v1.0.0' (was 3b9a7d1)"
+        );
+        let many: String = (0..60).map(|i| format!("v0.{}.0\n", i)).collect();
+        let out = format_tag_output(&many, 0, true);
+        assert_eq!(out.lines().count(), CAP_INVENTORY + 1);
+        assert!(out.ends_with("+10 more tags (60 total)"));
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(tag_is_listing(&s(&[])));
+        assert!(tag_is_listing(&s(&["-l", "v1.*"])));
+        assert!(tag_is_listing(&s(&["--sort=-v:refname"])));
+        assert!(!tag_is_listing(&s(&["v2.0.0"])));
+        assert!(!tag_is_listing(&s(&["-a", "v2.0.0", "-m", "release"])));
+        assert!(!tag_is_listing(&s(&["-d", "v2.0.0"])));
+    }
+
+    #[test]
+    fn test_restore_path_count_and_terminal_flags() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(restore_path_count(&s(&["."])), 1);
+        assert_eq!(restore_path_count(&s(&["--staged", "a.rs", "b.rs"])), 2);
+        assert_eq!(restore_path_count(&s(&["-s", "HEAD~1", "--", "a.rs"])), 1);
+        assert!(wants_terminal(&s(&["-i", "main"])));
+        assert!(wants_terminal(&s(&["--patch"])));
+        assert!(!wants_terminal(&s(&["--no-edit", "clean"])));
     }
 }

@@ -1,0 +1,10 @@
+test_add (tests.test_math.MathTests.test_add) ... ok
+test_mul (tests.test_math.MathTests.test_mul) ... ok
+test_sub (tests.test_math.MathTests.test_sub) ... ok
+test_skipped (tests.test_math.StrTests.test_skipped) ... skipped 'not now'
+test_upper (tests.test_math.StrTests.test_upper) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.000s
+
+OK (skipped=1)

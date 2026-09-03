@@ -9,6 +9,7 @@
 - `pip_cmd.rs` auto-detects `uv` as a pip alternative and routes accordingly
 - `uv_cmd.rs` preserves `uv run` environment semantics: the program's own output passes through on success (bounded, with a tee hint), diagnostics are extracted on failure
 - `python -m pytest` and `python3 -m mypy` are rewritten by the hook registry to `rtk pytest` / `rtk mypy`
+- `python -m unittest` is rewritten to `rtk unittest` (`unittest_cmd.rs`): FAIL/ERROR blocks are reduced to the test frame, the raising frame, the exception message and the assertion diff; progress dots, verbose `... ok` rows and traceback plumbing are dropped. The interpreter is `python3` when present, else `python`
 
 ## Cross-command
 

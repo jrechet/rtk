@@ -509,6 +509,54 @@ rtk git worktree [add|remove|prune|list] [args...]
 
 ---
 
+### `rtk git blame` -- Blame groupe par commit
+
+```bash
+rtk git blame [-L a,b] [-w] [rev] [--] <fichier>
+```
+
+Les metadonnees que git repete sur chaque ligne (hash, auteur, date) sont
+affichees une fois par plage de lignes consecutives du meme commit ; le code est
+conserve integralement avec son numero de ligne. Premiere ligne : `N lines · K commits · A authors`.
+Borne a `limits.read_max_lines` lignes de code (2000 par defaut) avec la commande
+`git blame -L` exacte pour la suite. `--porcelain`, `-p`, `-s`, `-n`, `-t`, `--date=`
+et `--incremental` passent en clair.
+
+---
+
+### `rtk git grep` -- Grep du depot compact
+
+```bash
+rtk git grep [-i] [-w] [--cached] <motif> [-- <pathspec>...]
+```
+
+Meme filtre que `rtk grep` : regroupement par fichier, plafond global et par
+fichier, debordement dans le tee. `git grep` reste le moteur execute. Les formes
+que le filtre ne reproduit pas passent en clair : expressions booleennes
+(`--and/--or/--not`), contexte (`-A/-B/-C`), `-p`/`-W`, `--heading`, `--name-only`,
+`-l`/`-c`/`-o`, et les operandes de revision (`git grep foo HEAD~3`).
+
+---
+
+### `rtk git switch/restore/merge/rebase/cherry-pick/revert/reset/tag/ls-files` -- Operations d'ecriture
+
+| Commande | Succes | Echec |
+|----------|--------|-------|
+| `switch` | `ok main`, `ok feature (new)` | message git |
+| `restore` | `ok N paths restored` | message git |
+| `merge` | `ok merge 3 files +10 -2`, `ok (fast-forward) ...`, `ok (up-to-date)` | `FAILED: git merge — N conflicts` + lignes `CONFLICT`, sans les `hint:` |
+| `rebase` | `ok rebased feature`, `ok (up-to-date)` | idem, prefixe `Rebasing (n/m)` retire |
+| `cherry-pick` / `revert` | `ok <hash> 1 file +1 -1` | idem |
+| `reset` | `ok HEAD <hash> <msg>` ou `ok N unstaged changes` + liste plafonnee a 20 | message git |
+| `tag` | liste plafonnee a 50 ; creation/suppression → `ok` ou la ligne git | message git |
+| `ls-files` | 50 premiers chemins puis `+N more files` avec hint tee | message git |
+
+Les formes interactives (`-i`, `--interactive`, `-p`, `--patch`, `-e`, `--edit`) passent
+en clair avec le terminal. `git remote`, `git rev-parse`, `git reflog` restent en
+passthrough : leur sortie est deja minimale.
+
+---
+
 ### Passthrough git
 
 Toute sous-commande git non listee ci-dessus est executee directement :
@@ -650,6 +698,21 @@ rtk vitest [args...]
 ```bash
 rtk playwright [args...]
 ```
+
+---
+
+### `rtk unittest` -- Tests Python (unittest)
+
+```bash
+rtk unittest [-v] [module|test id] [discover -s tests]   # python -m unittest
+```
+
+Seuls les blocs `FAIL:`/`ERROR:` sont conserves : nom du test, frame du test et
+frame de la levee (`chemin:ligne in fonction: source`), message d'exception et
+lignes de diff `-`/`+` (plafonnees). Les points de progression, les lignes
+`... ok` du mode verbeux, `Traceback`, les separateurs et les marqueurs `^~`
+disparaissent. Une ligne de resume termine : `FAILED: failures=2, errors=1 · 8 tests in 0.001s`
+ou `ok 5 tests in 0.000s (skipped=1)`.
 
 ---
 
@@ -866,6 +929,41 @@ Route intelligemment vers les filtres specialises :
 
 ---
 
+### `rtk yarn` -- yarn (classic et berry)
+
+```bash
+rtk yarn [install|add|remove|test|build|run <script>] [args...]
+```
+
+Supprime les bannieres de version, les etapes `[1/4] ...`, l'echo `$ commande`,
+`Done in`, et l'arbre `info All dependencies` (redondant avec les dependances
+directes). Les `warning` sont dedoublonnes et plafonnes a 10. Pour yarn berry,
+les lignes `YN0000` (structure, durees) disparaissent, les erreurs et le resume
+`YN0013` restent. Le hook reecrit les sous-commandes et scripts a sortie bornee ;
+`yarn dev`, `yarn start` et les scripts inconnus restent en clair. `yarn vitest`,
+`yarn tsc`, `yarn eslint`, `yarn dlx prettier` vont aux filtres d'outil.
+
+---
+
+### `rtk bun` / `rtk bunx` -- bun
+
+```bash
+rtk bun [install|add|remove|test|run <script>] [args...]
+rtk bunx <outil> [args...]
+```
+
+`bun install`/`add` : banniere, durees et `Saved lockfile` supprimes, liste
+`+ pkg@ver` plafonnee a 20, resume `N packages installed` conserve.
+`bun test` : seuls les echecs sont affiches, sous leur fichier, avec le message
+d'assertion, `Expected`/`Received` et au plus deux frames ; les extraits de source
+et les durees par test disparaissent. Une ligne de resume termine la sortie :
+`7 pass, 1 fail, 1 skip · 10 tests in 3 files [11ms]`. Tout passe : une seule ligne.
+`bun run <script>` : l'echo `$ commande` est retire, la sortie du script est intacte.
+`bun dev`, `bun start`, `bun fichier.ts` restent en clair ; `bun x tsc`, `bunx vitest`
+vont aux filtres d'outil.
+
+---
+
 ### `rtk pip` -- pip / uv
 
 ```bash
@@ -924,6 +1022,13 @@ CONTAINER ID   IMAGE          COMMAND     ...      web  nginx:1.25 Up 2d (health
 abc123def456   nginx:1.25     "/dock..."  ...      db   postgres:16 Up 2d (healthy)
 789012345678   postgres:16    "docker..."           redis redis:7 Up 1d
 ```
+
+
+**Operations avec progression** : `rtk docker pull`, `rtk docker compose up -d|down|pull|stop|start|restart`.
+Les redessins de terminal et lignes de progression par couche sont replies :
+`latest: Pulling from library/nginx` / `5 layers pulled, 2 cached` / `Status: Downloaded newer image...`.
+Pour compose, seul l'etat final de chaque ressource est affiche (`Container demo-web-1  Started`).
+`docker compose up` sans `-d` reste en streaming brut, il attache les logs des services.
 
 ---
 

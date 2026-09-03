@@ -1,0 +1,31 @@
+# Follow mode (-f, --follow, -xef, ...) streams forever and is never matched:
+# no short cluster may contain an `f` and no long option may start with `f`.
+[filters.journalctl]
+description = "Compact journalctl output (no follow mode)"
+match_command = "^journalctl(?:\\s+(?:-[a-eg-zA-Z0-9]+|--(?:[a-eg-z][\\w-]*)(?:=\\S+)?|[^-\\s]\\S*))*\\s*$"
+strip_ansi = true
+strip_lines_matching = [
+  "^-- (Logs begin|Journal begins|No entries|Boot |Reboot --)",
+]
+replace = [
+  # `Sep 02 14:05:01 host unit[pid]: msg` → `14:05:01 unit[pid]: msg`
+  { pattern = "^[A-Z][a-z]{2} \\d{2} (\\d{2}:\\d{2}:\\d{2}) \\S+ ", replacement = "$1 " },
+  # ISO timestamps (-o short-iso): keep the time, drop date and host
+  { pattern = "^\\d{4}-\\d{2}-\\d{2}T(\\d{2}:\\d{2}:\\d{2})[+-]\\d{4} \\S+ ", replacement = "$1 " },
+]
+tail_lines = 200
+on_empty = "journalctl: no entries"
+
+[[tests.journalctl]]
+name = "drops date and host, keeps unit and message"
+input = """
+-- Logs begin at Mon 2026-09-01 08:00:00 UTC, end at Wed 2026-09-02 14:05:01 UTC. --
+Sep 02 14:05:01 web-1 sshd[1234]: Accepted publickey for deploy from 10.0.0.5 port 51234 ssh2
+Sep 02 14:05:02 web-1 systemd[1]: Started Session 42 of User deploy.
+"""
+expected = "14:05:01 sshd[1234]: Accepted publickey for deploy from 10.0.0.5 port 51234 ssh2\n14:05:02 systemd[1]: Started Session 42 of User deploy."
+
+[[tests.journalctl]]
+name = "empty journal"
+input = "-- No entries --\n"
+expected = "journalctl: no entries"

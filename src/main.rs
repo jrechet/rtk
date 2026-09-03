@@ -12,14 +12,14 @@ use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
-    lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    bun_cmd, lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd,
+    tsc_cmd, vitest_cmd, yarn_cmd,
 };
 use cmds::jvm::{gradlew_cmd, mvn_cmd};
 use cmds::php::{
     ecs_cmd, paratest_cmd, pest_cmd, php_cmd, phpstan_cmd, phpt_cmd, phpunit_cmd, pint_cmd,
 };
-use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, unittest_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
@@ -594,6 +594,27 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// yarn (classic and berry) with install/run boilerplate stripped
+    Yarn {
+        /// yarn arguments (subcommand or script + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// bun with install chatter stripped and `bun test` failures-only output
+    Bun {
+        /// bun arguments (install, add, test, run <script>, ...)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// bunx: run a package binary with bun boilerplate stripped
+    Bunx {
+        /// bunx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Curl with auto-JSON detection and schema output
     Curl {
         /// Curl arguments (URL + options)
@@ -715,6 +736,13 @@ enum Commands {
     /// Pytest test runner with compact output
     Pytest {
         /// Pytest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// python -m unittest with failures-only output
+    Unittest {
+        /// unittest arguments (-v, module or test id, -k pattern, discover ...)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1003,6 +1031,72 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Switch branches → "ok <branch>" (same messages as checkout)
+    Switch {
+        /// Git switch arguments (-c, --detach, branch)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Restore paths → "ok N paths restored"
+    Restore {
+        /// Git restore arguments (--staged, --source, pathspecs)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Merge → one-line result, conflicts without hints on failure
+    Merge {
+        /// Git merge arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Rebase → one-line result, conflicts without hints on failure (-i passes through)
+    Rebase {
+        /// Git rebase arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Cherry-pick → "ok <hash> <diffstat>"
+    CherryPick {
+        /// Git cherry-pick arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Revert → "ok <hash> <diffstat>"
+    Revert {
+        /// Git revert arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Reset → "ok HEAD <hash>" or a capped list of unstaged paths
+    Reset {
+        /// Git reset arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Tag list capped at 50; create/delete → "ok"
+    Tag {
+        /// Git tag arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Tracked files capped at 50, the rest teed
+    LsFiles {
+        /// Git ls-files arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Blame grouped by commit run (hash/author/date once per range)
+    Blame {
+        /// Git blame arguments (supports -L, -w, -M, -C, revisions, -- path)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Grep the tracked files with grouped, capped matches (same filter as rtk grep)
+    Grep {
+        /// Git grep arguments (pattern, pathspecs, -n, -i, -w, --cached, ...)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1053,6 +1147,12 @@ enum DockerCommands {
     Images,
     /// Show container logs (deduplicated)
     Logs { container: String },
+    /// Pull an image: layer progress folded into counts
+    Pull {
+        /// docker pull arguments (image[:tag], --platform, ...)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Docker Compose commands with compact output
     Compose {
         #[command(subcommand)]
@@ -1082,6 +1182,42 @@ enum ComposeCommands {
     Build {
         /// Optional service name
         service: Option<String>,
+    },
+    /// Start services: final state per resource (streams raw without -d)
+    Up {
+        /// compose up arguments (-d, --build, services)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Stop and remove services: final state per resource
+    Down {
+        /// compose down arguments (-v, --remove-orphans, services)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Pull service images: layer progress folded into counts
+    Pull {
+        /// compose pull arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Stop services: final state per resource
+    Stop {
+        /// compose stop arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Start services: final state per resource
+    Start {
+        /// compose start arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Restart services: final state per resource
+    Restart {
+        /// compose restart arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Passthrough: runs any unsupported compose subcommand directly
     #[command(external_subcommand)]
@@ -1878,6 +2014,81 @@ fn run_cli() -> Result<i32> {
                     cli.verbose,
                     &global_args,
                 )?,
+                GitCommands::Blame { args } => git::run(
+                    git::GitCommand::Blame,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Switch { args } => git::run(
+                    git::GitCommand::Switch,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Restore { args } => git::run(
+                    git::GitCommand::Restore,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Merge { args } => git::run(
+                    git::GitCommand::Merge,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Rebase { args } => git::run(
+                    git::GitCommand::Rebase,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::CherryPick { args } => git::run(
+                    git::GitCommand::CherryPick,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Revert { args } => git::run(
+                    git::GitCommand::Revert,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Reset { args } => git::run(
+                    git::GitCommand::Reset,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Tag { args } => {
+                    git::run(git::GitCommand::Tag, &args, None, cli.verbose, &global_args)?
+                }
+                GitCommands::LsFiles { args } => git::run(
+                    git::GitCommand::LsFiles,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Grep { args } => search::run(
+                    search::Engine::GitGrep,
+                    &global_args,
+                    80,
+                    200,
+                    false,
+                    &args,
+                    cli.verbose,
+                )?,
                 GitCommands::Other(args) => git::run_passthrough(&args, &global_args, cli.verbose)?,
             }
         }
@@ -2025,10 +2236,29 @@ fn run_cli() -> Result<i32> {
                 ComposeCommands::Build { service } => {
                     container::run_compose_build(service.as_deref(), cli.verbose)?
                 }
+                ComposeCommands::Up { args } => {
+                    container::run_compose_op("up", &args, cli.verbose)?
+                }
+                ComposeCommands::Down { args } => {
+                    container::run_compose_op("down", &args, cli.verbose)?
+                }
+                ComposeCommands::Pull { args } => {
+                    container::run_compose_op("pull", &args, cli.verbose)?
+                }
+                ComposeCommands::Stop { args } => {
+                    container::run_compose_op("stop", &args, cli.verbose)?
+                }
+                ComposeCommands::Start { args } => {
+                    container::run_compose_op("start", &args, cli.verbose)?
+                }
+                ComposeCommands::Restart { args } => {
+                    container::run_compose_op("restart", &args, cli.verbose)?
+                }
                 ComposeCommands::Other(args) => {
                     container::run_compose_passthrough(&args, cli.verbose)?
                 }
             },
+            DockerCommands::Pull { args } => container::run_docker_pull(&args, cli.verbose)?,
             DockerCommands::Other(args) => container::run_docker_passthrough(&args, cli.verbose)?,
         },
 
@@ -2078,15 +2308,22 @@ fn run_cli() -> Result<i32> {
             extra_args,
         } => search::run(
             search::Engine::Grep,
+            &[],
             max_len,
             max,
             context_only,
             &extra_args,
             cli.verbose,
         )?,
-        Commands::Rg { extra_args } => {
-            search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
-        }
+        Commands::Rg { extra_args } => search::run(
+            search::Engine::Rg,
+            &[],
+            80,
+            200,
+            false,
+            &extra_args,
+            cli.verbose,
+        )?,
 
         Commands::Init {
             global,
@@ -2361,6 +2598,9 @@ fn run_cli() -> Result<i32> {
         },
 
         Commands::Npm { args } => npm_cmd::run(&args, cli.verbose, cli.skip_env)?,
+        Commands::Yarn { args } => yarn_cmd::run(&args, cli.verbose)?,
+        Commands::Bun { args } => bun_cmd::run(&args, cli.verbose)?,
+        Commands::Bunx { args } => bun_cmd::exec(&args, cli.verbose)?,
 
         Commands::Curl { args } => curl_cmd::run(&args, cli.verbose)?,
 
@@ -2466,6 +2706,7 @@ fn run_cli() -> Result<i32> {
         Commands::Ruff { args } => ruff_cmd::run(&args, cli.verbose)?,
 
         Commands::Pytest { args } => pytest_cmd::run(&args, cli.verbose)?,
+        Commands::Unittest { args } => unittest_cmd::run(&args, cli.verbose)?,
 
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
 
@@ -2868,9 +3109,13 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }
+            | Commands::Yarn { .. }
+            | Commands::Bun { .. }
+            | Commands::Bunx { .. }
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
+            | Commands::Unittest { .. }
             | Commands::Php { .. }
             | Commands::Phpunit { .. }
             | Commands::Phpstan { .. }
@@ -3271,6 +3516,10 @@ mod tests {
             "cargo",
             "npm",
             "npx",
+            "yarn",
+            "bun",
+            "bunx",
+            "unittest",
             "curl",
             "ruff",
             "pytest",

@@ -1,0 +1,17 @@
+[filters.terraform-validate]
+description = "Compact Terraform validate output"
+match_command = "^terraform\\s+validate(\\s|$)"
+strip_ansi = true
+match_output = [
+  { pattern = "Success! The configuration is valid", message = "ok (valid)" },
+]
+
+[[tests.terraform-validate]]
+name = "success short-circuits to ok"
+input = "Success! The configuration is valid."
+expected = "ok (valid)"
+
+[[tests.terraform-validate]]
+name = "error passes through unchanged"
+input = "Error: Unsupported argument\n  on main.tf line 4, in resource \"aws_instance\" \"web\":"
+expected = "Error: Unsupported argument\n  on main.tf line 4, in resource \"aws_instance\" \"web\":"

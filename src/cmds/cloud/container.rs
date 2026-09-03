@@ -7,9 +7,11 @@ use crate::core::tracking;
 use crate::core::truncate::{CAP_INVENTORY, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::process::Command;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ContainerCmd {
@@ -766,6 +768,160 @@ pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("docker", &combined, verbose)
 }
 
+// --- docker pull / docker compose up -d / down / pull / stop / start / restart ---
+
+/// Compose resource states that only narrate progress; the final state of the
+/// same resource (Created, Started, Stopped, Removed, Running, Healthy) is
+/// what matters.
+const COMPOSE_TRANSIENT_STATES: &[&str] = &[
+    "Creating",
+    "Recreating",
+    "Starting",
+    "Restarting",
+    "Stopping",
+    "Killing",
+    "Removing",
+    "Waiting",
+    "Pulling",
+    "Downloading",
+    "Extracting",
+    "Building",
+    "Building...",
+];
+
+/// `Container demo-web-1  Started` / `Network demo_default  Created`.
+static COMPOSE_RESOURCE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(Container|Network|Volume|Image|Service)\s+(\S+)\s+(\S.*)$").unwrap()
+});
+/// `a2abf6c4d29d: Pull complete`, `a2abf6c4d29d: Downloading  1.2MB/31MB`.
+static PULL_LAYER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-f]{12}: (.+)$").unwrap());
+
+/// Shared filter for the progress-heavy docker commands: strips ANSI and
+/// carriage-return redraws, folds layer progress into counts, keeps only the
+/// final state of each compose resource, and keeps every other line (errors,
+/// warnings, `Status:`).
+pub fn format_docker_progress(raw: &str, exit_code: i32) -> String {
+    let compact = crate::core::passthrough::compact(raw, 0).text;
+    let mut pulled = 0usize;
+    let mut cached = 0usize;
+    // (kind, name) → last line seen, and whether a final state was seen.
+    let mut resources: Vec<(String, String, bool)> = Vec::new();
+    let mut other: Vec<String> = Vec::new();
+
+    for line in compact.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(caps) = PULL_LAYER_RE.captures(t) {
+            let state = caps[1].trim_end_matches([' ', '.']);
+            if state == "Pull complete" {
+                pulled += 1;
+            } else if state == "Already exists" {
+                cached += 1;
+            }
+            continue; // Pulling fs layer / Waiting / Downloading / Extracting / Verifying
+        }
+        if t.starts_with("Digest: ") || t.starts_with("docker.io/") {
+            continue;
+        }
+        if let Some(caps) = COMPOSE_RESOURCE_RE.captures(t) {
+            let key = format!("{} {}", &caps[1], &caps[2]);
+            let state = caps[3].trim();
+            let is_final = !COMPOSE_TRANSIENT_STATES.contains(&state);
+            let rendered = format!("{} {}  {}", &caps[1], &caps[2], state);
+            match resources.iter_mut().find(|(k, _, _)| *k == key) {
+                Some(entry) => {
+                    if is_final || !entry.2 {
+                        entry.1 = rendered;
+                        entry.2 = entry.2 || is_final;
+                    }
+                }
+                None => resources.push((key, rendered, is_final)),
+            }
+            continue;
+        }
+        other.push(t.to_string());
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    // Pull header (`latest: Pulling from library/nginx`) stays in `other`.
+    let mut layer_summary = Vec::new();
+    if pulled > 0 {
+        layer_summary.push(format!("{} layers pulled", pulled));
+    }
+    if cached > 0 {
+        layer_summary.push(format!("{} cached", cached));
+    }
+    for line in &other {
+        out.push(line.clone());
+        if line.contains(": Pulling from ") && !layer_summary.is_empty() {
+            out.push(layer_summary.join(", "));
+            layer_summary.clear();
+        }
+    }
+    if !layer_summary.is_empty() {
+        out.insert(0, layer_summary.join(", "));
+    }
+    out.extend(resources.into_iter().map(|(_, line, _)| line));
+
+    if out.is_empty() {
+        return if exit_code == 0 {
+            "ok".to_string()
+        } else {
+            crate::core::utils::fallback_tail(raw, "docker", 20)
+        };
+    }
+    out.join("\n")
+}
+
+pub fn run_docker_pull(args: &[String], verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command("docker");
+    cmd.arg("pull");
+    cmd.args(args);
+    if verbose > 0 {
+        eprintln!("docker pull {}", args.join(" "));
+    }
+    runner::run_filtered_with_exit(
+        cmd,
+        "docker",
+        &format!("pull {}", args.join(" ")),
+        format_docker_progress,
+        RunOptions::with_tee("docker_pull"),
+    )
+}
+
+/// `docker compose up` without `-d`/`--detach` attaches to the services'
+/// logs and must keep streaming raw.
+pub fn compose_up_is_detached(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a == "--detach" || (a.starts_with('-') && !a.starts_with("--") && a.contains('d'))
+    })
+}
+
+pub fn run_compose_op(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
+    if subcommand == "up" && !compose_up_is_detached(args) {
+        let mut raw_args: Vec<OsString> = vec![OsString::from("up")];
+        raw_args.extend(args.iter().map(OsString::from));
+        return run_compose_passthrough(&raw_args, verbose);
+    }
+    let mut cmd = resolved_command("docker");
+    cmd.args(["compose", subcommand]);
+    cmd.args(args);
+    if verbose > 0 {
+        eprintln!("docker compose {} {}", subcommand, args.join(" "));
+    }
+    let tee_label = format!("docker_compose_{}", subcommand);
+    runner::run_filtered_with_exit(
+        cmd,
+        "docker",
+        &format!("compose {} {}", subcommand, args.join(" ")),
+        format_docker_progress,
+        RunOptions::with_tee(&tee_label),
+    )
+}
+
 pub fn run_kubectl_get(args: &[String], verbose: u8) -> Result<i32> {
     run_k8s_get("kubectl", args, verbose)
 }
@@ -1021,5 +1177,89 @@ api-1  | Connected to database";
             "Expected >=60% savings, got {:.1}%",
             savings
         );
+    }
+
+    // --- docker pull / compose ops ---
+    // Shapes below follow docker's plain (non-TTY) progress output.
+
+    #[test]
+    fn test_docker_pull_folds_layers() {
+        let raw = "\
+latest: Pulling from library/nginx
+a2abf6c4d29d: Pulling fs layer
+a2abf6c4d29d: Downloading  1.2MB/31MB
+a2abf6c4d29d: Downloading  30MB/31MB
+a2abf6c4d29d: Verifying Checksum
+a2abf6c4d29d: Download complete
+a2abf6c4d29d: Pull complete
+7f9a2b1c3d4e: Already exists
+c8d9e0f1a2b3: Pulling fs layer
+c8d9e0f1a2b3: Extracting  512kB/8MB
+c8d9e0f1a2b3: Pull complete
+Digest: sha256:0d17b565c37bcbd895e9d92315a05c1c3c9a29f762b011a10c54a66cd53c9b31
+Status: Downloaded newer image for nginx:latest
+docker.io/library/nginx:latest
+";
+        let out = format_docker_progress(raw, 0);
+        assert_eq!(
+            out,
+            "latest: Pulling from library/nginx\n2 layers pulled, 1 cached\nStatus: Downloaded newer image for nginx:latest"
+        );
+        assert!(out.len() * 10 < raw.len() * 4, "expected >=60% savings, got {}/{}", out.len(), raw.len());
+    }
+
+    #[test]
+    fn test_compose_up_keeps_final_states_only() {
+        let raw = "\
+ Network demo_default  Creating
+ Network demo_default  Created
+ Container demo-db-1  Creating
+ Container demo-db-1  Created
+ Container demo-web-1  Creating
+ Container demo-web-1  Created
+ Container demo-db-1  Starting
+ Container demo-db-1  Started
+ Container demo-web-1  Starting
+ Container demo-web-1  Started
+";
+        assert_eq!(
+            format_docker_progress(raw, 0),
+            "Network demo_default  Created\nContainer demo-db-1  Started\nContainer demo-web-1  Started"
+        );
+    }
+
+    #[test]
+    fn test_compose_down_and_errors() {
+        let raw = "\
+ Container demo-web-1  Stopping
+ Container demo-web-1  Stopped
+ Container demo-web-1  Removing
+ Container demo-web-1  Removed
+ Network demo_default  Removing
+Error response from daemon: error while removing network: network demo_default has active endpoints
+";
+        assert_eq!(
+            format_docker_progress(raw, 1),
+            "Error response from daemon: error while removing network: network demo_default has active endpoints\n\
+Container demo-web-1  Removed\n\
+Network demo_default  Removing"
+        );
+    }
+
+    #[test]
+    fn test_docker_progress_handles_tty_redraws_and_empty() {
+        let raw = "\x1b[1A\x1b[0G Container app  Starting\r Container app  Started\n";
+        assert_eq!(format_docker_progress(raw, 0), "Container app  Started");
+        assert_eq!(format_docker_progress("", 0), "ok");
+    }
+
+    #[test]
+    fn test_compose_up_is_detached() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(compose_up_is_detached(&s(&["-d"])));
+        assert!(compose_up_is_detached(&s(&["--detach", "web"])));
+        assert!(compose_up_is_detached(&s(&["-d", "--build"])));
+        assert!(!compose_up_is_detached(&s(&[])));
+        assert!(!compose_up_is_detached(&s(&["--build", "web"])));
     }
 }

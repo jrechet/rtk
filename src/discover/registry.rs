@@ -2818,11 +2818,273 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_git_write_subcommands() {
+        for (cmd, expected) in [
+            ("git switch main", "rtk git switch main"),
+            ("git switch -c feature", "rtk git switch -c feature"),
+            ("git restore .", "rtk git restore ."),
+            (
+                "git restore --staged src/a.rs",
+                "rtk git restore --staged src/a.rs",
+            ),
+            (
+                "git merge --no-edit feature",
+                "rtk git merge --no-edit feature",
+            ),
+            ("git rebase main", "rtk git rebase main"),
+            ("git rebase -i HEAD~3", "rtk git rebase -i HEAD~3"),
+            ("git cherry-pick abc1234", "rtk git cherry-pick abc1234"),
+            ("git revert HEAD", "rtk git revert HEAD"),
+            ("git reset --hard HEAD~1", "rtk git reset --hard HEAD~1"),
+            ("git tag", "rtk git tag"),
+            ("git tag -a v1.0 -m rel", "rtk git tag -a v1.0 -m rel"),
+            ("git ls-files src", "rtk git ls-files src"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "git remote -v",
+            "git rev-parse HEAD",
+            "git reflog",
+            "git tagging",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_docker_pull_and_compose_ops() {
+        for (cmd, expected) in [
+            ("docker pull nginx:1.25", "rtk docker pull nginx:1.25"),
+            ("docker compose up -d", "rtk docker compose up -d"),
+            (
+                "docker compose up -d --build web",
+                "rtk docker compose up -d --build web",
+            ),
+            (
+                "docker compose up --detach",
+                "rtk docker compose up --detach",
+            ),
+            ("docker compose down -v", "rtk docker compose down -v"),
+            ("docker compose pull", "rtk docker compose pull"),
+            (
+                "docker compose restart web",
+                "rtk docker compose restart web",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        // Attached `up` streams service logs: never captured.
+        assert_eq!(rewrite_command_no_prefixes("docker compose up", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("docker compose up --build web", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_terraform_lifecycle() {
+        for (cmd, expected) in [
+            ("terraform init", "rtk terraform init"),
+            ("terraform init -upgrade", "rtk terraform init -upgrade"),
+            ("terraform validate", "rtk terraform validate"),
+            ("terraform fmt -recursive", "rtk terraform fmt -recursive"),
+            (
+                "terraform apply -auto-approve",
+                "rtk terraform apply -auto-approve",
+            ),
+            (
+                "terraform destroy -auto-approve -var env=dev",
+                "rtk terraform destroy -auto-approve -var env=dev",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        // Interactive apply/destroy wait on a prompt: never captured.
+        assert_eq!(rewrite_command_no_prefixes("terraform apply", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("terraform destroy", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_journalctl_never_follows() {
+        for (cmd, expected) in [
+            ("journalctl -u nginx -n 50", "rtk journalctl -u nginx -n 50"),
+            ("journalctl -xe", "rtk journalctl -xe"),
+            (
+                "journalctl --unit=nginx --since today",
+                "rtk journalctl --unit=nginx --since today",
+            ),
+            (
+                "journalctl -b -p err --no-pager",
+                "rtk journalctl -b -p err --no-pager",
+            ),
+            ("journalctl", "rtk journalctl"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "journalctl -f",
+            "journalctl -u nginx -f",
+            "journalctl -xef",
+            "journalctl --follow -u nginx",
+            "journalctl -u nginx --follow",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_python_unittest() {
+        for (cmd, expected) in [
+            ("python -m unittest", "rtk unittest"),
+            ("python3 -m unittest -v", "rtk unittest -v"),
+            (
+                "python3 -m unittest tests.test_bad",
+                "rtk unittest tests.test_bad",
+            ),
+            (
+                "python3 -m unittest discover -s tests",
+                "rtk unittest discover -s tests",
+            ),
+            (
+                "python3 -m unittest 2>&1 | tail -20",
+                "rtk unittest 2>&1 | tail -20",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("python3 -m unittests", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_dotnet_test() {
         assert_eq!(
             rewrite_command_no_prefixes("dotnet test --no-build", &[]),
             Some("rtk dotnet test --no-build".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_subcommands_and_scripts() {
+        for (cmd, expected) in [
+            ("yarn", "rtk yarn"),
+            ("yarn --frozen-lockfile", "rtk yarn --frozen-lockfile"),
+            ("yarn install", "rtk yarn install"),
+            ("yarn add left-pad", "rtk yarn add left-pad"),
+            ("yarn remove left-pad", "rtk yarn remove left-pad"),
+            ("yarn test", "rtk yarn test"),
+            ("yarn build", "rtk yarn build"),
+            ("yarn run build", "rtk yarn run build"),
+            ("yarn typecheck", "rtk yarn typecheck"),
+            ("yarn test 2>&1 | tail -20", "rtk yarn test 2>&1 | tail -20"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        // Streaming scripts and unknown scripts stay raw.
+        for cmd in [
+            "yarn dev",
+            "yarn start",
+            "yarn run dev",
+            "yarn storybook",
+            "yarn my-script",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_yarn_tool_invocations_go_to_tool_filters() {
+        for (cmd, expected) in [
+            ("yarn vitest run", "rtk vitest"),
+            ("yarn run vitest", "rtk vitest"),
+            ("yarn tsc --noEmit", "rtk tsc --noEmit"),
+            ("yarn eslint .", "rtk lint ."),
+            ("yarn dlx prettier --check .", "rtk prettier --check ."),
+            ("yarn exec playwright test", "rtk playwright test"),
+            ("yarn jest --ci", "rtk jest --ci"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_bun_subcommands_and_scripts() {
+        for (cmd, expected) in [
+            ("bun install", "rtk bun install"),
+            ("bun i", "rtk bun i"),
+            ("bun add zod", "rtk bun add zod"),
+            ("bun test", "rtk bun test"),
+            ("bun test src/a.test.ts", "rtk bun test src/a.test.ts"),
+            ("bun run build", "rtk bun run build"),
+            ("bun run test", "rtk bun run test"),
+            ("bun x cowsay hi", "rtk bun x cowsay hi"),
+            ("bunx cowsay hi", "rtk bunx cowsay hi"),
+            ("bun test 2>&1 | tail -30", "rtk bun test 2>&1 | tail -30"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
+        for cmd in [
+            "bun dev",
+            "bun run dev",
+            "bun start",
+            "bun index.ts",
+            "bun --version",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_bun_tool_invocations_go_to_tool_filters() {
+        for (cmd, expected) in [
+            ("bun x tsc --noEmit", "rtk tsc --noEmit"),
+            ("bunx tsc --noEmit", "rtk tsc --noEmit"),
+            ("bunx vitest run", "rtk vitest"),
+            ("bun run vitest", "rtk vitest"),
+            ("bun run eslint src", "rtk lint src"),
+            ("bunx prisma generate", "rtk prisma generate"),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                Some(expected.into()),
+                "{cmd}"
+            );
+        }
     }
 
     #[test]
@@ -3917,18 +4179,20 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_docker_compose_up_skipped() {
+    fn test_rewrite_docker_compose_up_attached_skipped() {
+        // Without -d, `up` attaches to the service logs: it must keep streaming.
+        assert_eq!(rewrite_command_no_prefixes("docker compose up", &[]), None);
         assert_eq!(
             rewrite_command_no_prefixes("docker compose up -d", &[]),
-            None
+            Some("rtk docker compose up -d".into())
         );
     }
 
     #[test]
-    fn test_rewrite_docker_compose_down_skipped() {
+    fn test_rewrite_docker_compose_down() {
         assert_eq!(
             rewrite_command_no_prefixes("docker compose down", &[]),
-            None
+            Some("rtk docker compose down".into())
         );
     }
 
